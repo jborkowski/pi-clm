@@ -19,9 +19,12 @@
     "@earendil-works/pi-ai": "^0.99.2",
     "@earendil-works/pi-coding-agent": "^0.99.2",
     "@types/node": "^24.19.0",
+    "jscpd": "^5.4.0",
     "typescript": "^5.9.3"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:dup": "jscpd .",
+    "lint:dup": "jscpd ."
   }
 }

@@ -1,0 +1,23 @@
+{
+  "threshold": 0,
+  "minTokens": 50,
+  "minLines": 5,
+  "mode": "mild",
+  "reporters": [
+    "console"
+  ],
+  "ignore": [
+    "**/node_modules/**",
+    "**/.git/**",
+    "**/.agents/**",
+    "**/.pi/**",
+    "**/dist/**",
+    "**/coverage/**",
+    "package-lock.json",
+    "skills-lock.json"
+  ],
+  "format": [
+    "javascript",
+    "typescript"
+  ]
+}
