@@ -27,7 +27,7 @@ export interface ServerManagerOptions {
 
   /** Overrides the HF hub cache root (default: standard HF_HUB_CACHE / HF_HOME / ~/.cache/huggingface/hub). */
   hubCacheDir?: string;
-  /** Directory for the lock file and server log. */
+  /** Directory for the lock file, server log, and saved model/quantization config. */
   stateDir?: string;
   serverScriptPath?: string;
   startupTimeoutMs?: number;
@@ -66,7 +66,7 @@ export function isProcessRunning(pid: number): boolean {
   }
 }
 
-/** Directory for pi-clm runtime state (lock file, server log). */
+/** Directory for pi-clm runtime state (lock file, server log, saved model/quantization config). */
 export function getDefaultStateDir(): string {
   if (process.env.PI_CLM_STATE_DIR) {
     return process.env.PI_CLM_STATE_DIR;
