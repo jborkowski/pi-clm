@@ -24,6 +24,7 @@ const MOCK_COMMIT_SHA = "e".repeat(40);
       sessionHandlers[event] = handler;
     },
     registerCommand: () => {},
+    registerTool: () => {},
   });
 
 test("Extension index end-to-end classify test suite", async (t) => {
@@ -59,6 +60,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
         if (event === "session_shutdown") shutdownHandlers.push(handler);
       },
       registerCommand: () => {},
+      registerTool: () => {},
     };
     return { pi, shutdownHandlers };
   };
@@ -533,6 +535,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
     const mockPi: any = {
       registerProvider: () => {},
       on: () => {},
+      registerTool: () => {},
       registerCommand: (_id: string, config: any) => {
         commandConfig = config;
       },
