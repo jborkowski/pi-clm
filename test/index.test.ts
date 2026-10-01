@@ -17,6 +17,14 @@ import { freePort } from "./helpers.ts";
 
 const MOCK_COMMIT_SHA = "e".repeat(40);
 
+/** Answer /health with the standard ok payload; returns false for any other URL. */
+const serveHealth = (req: http.IncomingMessage, res: http.ServerResponse): boolean => {
+  if (req.url !== "/health") return false;
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ status: "ok", model: "clm-latest" }));
+  return true;
+};
+
   /** Mock ExtensionAPI capturing session handlers and the /clm command. */
   const makeRecordingPi = (sessionHandlers: Record<string, any>) => ({
     registerProvider: () => {},
@@ -188,11 +196,11 @@ test("Extension index end-to-end classify test suite", async (t) => {
     let classifyHits = 0;
 
     const mockServer = http.createServer((req, res) => {
-      if (req.url === "/health") {
+      if (serveHealth(req, res)) {
         healthHits++;
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ status: "ok", model: "clm-latest" }));
-      } else if (req.url === "/v1/systemone") {
+        return;
+      }
+      if (req.url === "/v1/systemone") {
         classifyHits++;
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -287,10 +295,8 @@ test("Extension index end-to-end classify test suite", async (t) => {
     const port = await freePort();
     const wireRequests: any[] = [];
     const mockServer = http.createServer((req, res) => {
-      if (req.url === "/health") {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ status: "ok", model: "clm-latest" }));
-      } else if (req.url === "/v1/systemone") {
+      if (serveHealth(req, res)) return;
+      if (req.url === "/v1/systemone") {
         let data = "";
         req.on("data", (c) => (data += c));
         req.on("end", () => {
@@ -459,10 +465,8 @@ test("Extension index end-to-end classify test suite", async (t) => {
 
     let classifyCalls = 0;
     const mockRunningServer = http.createServer((req, res) => {
-      if (req.url === "/health") {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ status: "ok", model: "clm-latest" }));
-      } else if (req.url === "/v1/systemone") {
+      if (serveHealth(req, res)) return;
+      if (req.url === "/v1/systemone") {
         classifyCalls++;
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -692,10 +696,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
     // /clm start: attaches to an already-healthy server without downloading
     // (mock on defaultPort — the port this plugin's ServerManager already has)
     const mockStart = http.createServer((req, res) => {
-      if (req.url === "/health") {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ status: "ok", model: "clm-latest" }));
-      } else {
+      if (!serveHealth(req, res)) {
         res.writeHead(404);
         res.end();
       }

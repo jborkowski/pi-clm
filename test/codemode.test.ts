@@ -143,18 +143,13 @@ test("createClm score maps fractional indices through custom numeric criteria", 
   assert.equal(answer.value, 5);
 });
 
-test("createClm score with non-numeric labels falls back to the index", async () => {
-  const clm = createClm(mockClassify({ score: { score: 2, confidence: 0.5 } }));
-  const answer = await clm.score("How bad?", ["low", "medium", "high"]);
-  assert.equal(answer.answer, "high");
-  assert.equal(answer.value, 2);
-});
-
-test("createClm score with fractional non-numeric labels picks the nearest label", async () => {
-  const clm = createClm(mockClassify({ score: { score: 1.6, confidence: 0.5 } }));
-  const answer = await clm.score("How bad?", ["low", "medium", "high"]);
-  assert.equal(answer.answer, "high");
-  assert.equal(answer.value, 2);
+test("createClm score with non-numeric labels picks the nearest label for integer and fractional indices", async () => {
+  for (const serverScore of [2, 1.6]) {
+    const clm = createClm(mockClassify({ score: { score: serverScore, confidence: 0.5 } }));
+    const answer = await clm.score("How bad?", ["low", "medium", "high"]);
+    assert.equal(answer.answer, "high", `server score ${serverScore}`);
+    assert.equal(answer.value, 2, `server score ${serverScore}`);
+  }
 });
 
 test("createClm calls compose with Promise.all over one shared classify fn", async () => {
