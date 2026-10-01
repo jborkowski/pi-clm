@@ -116,6 +116,51 @@ test("Extension index end-to-end classify test suite", async (t) => {
     throw new Error(`health server on port ${port} never came up`);
   };
 
+  /** Mock ExtensionAPI capturing registered commands (plus event handlers when a store is given). */
+  const makeCommandPi = (commands: Record<string, any>, eventHandlers?: Record<string, any>) => {
+    const pi: any = {
+      registerProvider: () => {},
+      on: (event: string, handler: any) => {
+        if (eventHandlers) eventHandlers[event] = handler;
+      },
+      registerCommand: (id: string, config: any) => {
+        commands[id] = config;
+      },
+    };
+    return pi;
+  };
+
+  /** Quantization-menu selector: picks 4-bit, falling back to the first model entry. */
+  const pick4Bit = async (_title: string, options: string[]) =>
+    options.find((o) => o.includes("4-bit")) ?? options[0];
+
+  /** JSON-mode command ctx collecting notify messages and using the given menu selector. */
+  const makeConfigureCtx = (
+    notify: (message: string, level: string) => void,
+    select: (title: string, options: string[]) => Promise<string | undefined> = pick4Bit
+  ): any => ({
+    mode: "json",
+    hasUI: false,
+    ui: { notify, select, custom: () => {}, setWidget: () => {} },
+  });
+
+  /** Registers the plugin on a command-capturing mock with a fresh status tracker, runs /clm configure once (4-bit pick), and returns the tracker plus captured notifications. */
+  const runConfigureCommand = async (pluginOptions: Record<string, any> = {}) => {
+    const commands: Record<string, any> = {};
+    const mockPi = makeCommandPi(commands);
+    const tracker = new ClmStatusTracker();
+    await registerPlugin(mockPi, { ...pluginOptions, statusTracker: tracker });
+    const notifications: string[] = [];
+    const ctx = makeConfigureCtx((m: string) => notifications.push(m));
+    await commands["clm"].handler("configure", ctx);
+    return { tracker, notifications };
+  };
+
+  /** Fires session_start with a bare collecting UI ctx; notices land in the sink. */
+  const emitSessionStart = async (sessionHandlers: Record<string, any>, sink: string[]) => {
+    await sessionHandlers["session_start"]({}, { ui: { notify: (m: string) => sink.push(m) } });
+  };
+
   await t.test("registers provider and handles classify with choice/bool/score questions and token usage", async () => {
     let registeredProviderId = "";
     let registeredConfig: any = null;
@@ -691,30 +736,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
         sessions: [sm.getSessionId(), "session-other"],
       });
 
-      const commands: Record<string, any> = {};
-      const mockPi: any = {
-        registerProvider: () => {},
-        on: () => {},
-        registerCommand: (id: string, config: any) => {
-          commands[id] = config;
-        },
-      };
-      const tracker = new ClmStatusTracker();
-      await registerPlugin(mockPi, { serverManager: sm, statusTracker: tracker });
-
-      const notifications: string[] = [];
-      const ctx: any = {
-        mode: "json",
-        hasUI: false,
-        ui: {
-          notify: (m: string) => notifications.push(m),
-          select: async (_title: string, options: string[]) =>
-            options.find((o) => o.includes("4-bit")) ?? options[0],
-          custom: () => {},
-          setWidget: () => {},
-        },
-      };
-      await commands["clm"].handler("configure", ctx);
+      const { tracker, notifications } = await runConfigureCommand({ serverManager: sm });
 
       // Told plainly: the old variant keeps serving until that server stops
       assert.ok(
@@ -757,30 +779,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
         sessions: [sm.getSessionId()],
       });
 
-      const commands: Record<string, any> = {};
-      const mockPi: any = {
-        registerProvider: () => {},
-        on: () => {},
-        registerCommand: (id: string, config: any) => {
-          commands[id] = config;
-        },
-      };
-      const tracker = new ClmStatusTracker();
-      await registerPlugin(mockPi, { serverManager: sm, statusTracker: tracker });
-
-      const notifications: string[] = [];
-      const ctx: any = {
-        mode: "json",
-        hasUI: false,
-        ui: {
-          notify: (m: string) => notifications.push(m),
-          select: async (_title: string, options: string[]) =>
-            options.find((o) => o.includes("4-bit")) ?? options[0],
-          custom: () => {},
-          setWidget: () => {},
-        },
-      };
-      await commands["clm"].handler("configure", ctx);
+      const { tracker, notifications } = await runConfigureCommand({ serverManager: sm });
 
       assert.ok(
         notifications.some((n) => n.includes("server stopped; it will start with the new variant on next use")),
@@ -805,40 +804,20 @@ test("Extension index end-to-end classify test suite", async (t) => {
     try {
       const sessionHandlers: Record<string, any> = {};
       const commands: Record<string, any> = {};
-      const mockPi: any = {
-        registerProvider: () => {},
-        on: (event: string, handler: any) => {
-          sessionHandlers[event] = handler;
-        },
-        registerCommand: (id: string, config: any) => {
-          commands[id] = config;
-        },
-      };
+      const mockPi = makeCommandPi(commands, sessionHandlers);
       await registerPlugin(mockPi);
 
       const notices: string[] = [];
-      const startCtx: any = { ui: { notify: (m: string) => notices.push(m) } };
-
-      await sessionHandlers["session_start"]({}, startCtx);
+      await emitSessionStart(sessionHandlers, notices);
       assert.ok(notices.some((n) => n.includes("no model variant chosen yet")), notices.join("\n"));
 
       notices.length = 0;
-      const ctx: any = {
-        mode: "json",
-        hasUI: false,
-        ui: {
-          notify: (m: string) => notices.push(m),
-          select: async (_title: string, options: string[]) =>
-            options.find((o) => o.includes("4-bit")) ?? options[0],
-          custom: () => {},
-          setWidget: () => {},
-        },
-      };
+      const ctx: any = makeConfigureCtx((m: string) => notices.push(m));
       await commands["clm"].handler("configure", ctx);
       assert.ok(notices.some((n) => n.includes("mlx-community/CLM-v0.1-8B-MLX-4bit")));
 
       notices.length = 0;
-      await sessionHandlers["session_start"]({}, startCtx);
+      await emitSessionStart(sessionHandlers, notices);
       assert.equal(notices.length, 0);
     } finally {
       if (prevEnv === undefined) delete process.env.PI_CLM_STATE_DIR;
@@ -856,28 +835,12 @@ test("Extension index end-to-end classify test suite", async (t) => {
     process.env.PI_CLM_STATE_DIR = statePath;
     try {
       const commands: Record<string, any> = {};
-      const mockPi: any = {
-        registerProvider: () => {},
-        on: () => {},
-        registerCommand: (id: string, config: any) => {
-          commands[id] = config;
-        },
-      };
+      const mockPi = makeCommandPi(commands);
       const tracker = new ClmStatusTracker();
       await registerPlugin(mockPi, { statusTracker: tracker });
 
       const notified: Array<{ message: string; level: string }> = [];
-      const ctx: any = {
-        mode: "json",
-        hasUI: false,
-        ui: {
-          notify: (m: string, level: string) => notified.push({ message: m, level }),
-          select: async (_title: string, options: string[]) =>
-            options.find((o) => o.includes("4-bit")) ?? options[0],
-          custom: () => {},
-          setWidget: () => {},
-        },
-      };
+      const ctx: any = makeConfigureCtx((m: string, level: string) => notified.push({ message: m, level }));
       // Resolves instead of rejecting: the handler reports the failure itself
       await commands["clm"].handler("configure", ctx);
 
@@ -927,15 +890,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
 
       const sessionHandlers: Record<string, any> = {};
       const commands: Record<string, any> = {};
-      const mockPi: any = {
-        registerProvider: () => {},
-        on: (event: string, handler: any) => {
-          sessionHandlers[event] = handler;
-        },
-        registerCommand: (id: string, config: any) => {
-          commands[id] = config;
-        },
-      };
+      const mockPi = makeCommandPi(commands, sessionHandlers);
       // Embedder pins the 8-bit repo while a 4-bit choice is saved
       await registerPlugin(mockPi, {
         modelOptions: { repo: "mlx-community/CLM-v0.1-8B-MLX-8bit", cacheDir },
@@ -944,8 +899,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
 
       // One clear notice about the override, and no misleading first-use notice
       const notices: string[] = [];
-      const startCtx: any = { ui: { notify: (m: string) => notices.push(m) } };
-      await sessionHandlers["session_start"]({}, startCtx);
+      await emitSessionStart(sessionHandlers, notices);
       assert.ok(
         notices.some((n) => n.includes("overrides the registered modelOptions.repo (mlx-community/CLM-v0.1-8B-MLX-8bit)")),
         notices.join("\n")
@@ -954,21 +908,12 @@ test("Extension index end-to-end classify test suite", async (t) => {
       assert.ok(!notices.some((n) => n.includes("no model variant chosen yet")));
 
       notices.length = 0;
-      await sessionHandlers["session_start"]({}, startCtx);
+      await emitSessionStart(sessionHandlers, notices);
       assert.equal(notices.length, 0);
 
       // Status resolves the saved 4-bit repo (present in the cache dir), not the pinned 8-bit one
       const statusNotices: string[] = [];
-      const ctx: any = {
-        mode: "json",
-        hasUI: false,
-        ui: {
-          notify: (m: string) => statusNotices.push(m),
-          select: async () => undefined,
-          custom: () => {},
-          setWidget: () => {},
-        },
-      };
+      const ctx: any = makeConfigureCtx((m: string) => statusNotices.push(m), async () => undefined);
       await commands["clm"].handler("status", ctx);
       assert.ok(
         statusNotices.includes("CLM: model downloaded"),
