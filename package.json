@@ -27,5 +27,8 @@
     "typecheck": "tsc --noEmit",
     "check:dup": "jscpd .",
     "lint:dup": "jscpd ."
+  },
+  "dependencies": {
+    "@huggingface/hub": "^2.17.5"
   }
 }

@@ -37,7 +37,7 @@ test("ServerManager test suite", async (t) => {
   await t.test("checkHealth returns false when nothing is listening", async () => {
     const manager = new ServerManager({
       port: 59123,
-      cacheDir: tempDir,
+      stateDir: tempDir,
     });
     const health = await manager.checkHealth();
     assert.equal(health.ok, false);
@@ -50,7 +50,7 @@ test("ServerManager test suite", async (t) => {
     try {
       const manager = new ServerManager({
         port,
-        cacheDir: tempDir,
+        stateDir: tempDir,
       });
       const health = await manager.checkHealth();
       assert.equal(health.ok, true);
@@ -63,8 +63,8 @@ test("ServerManager test suite", async (t) => {
 
   await t.test("lockfile management and refCount tracking across sessions", async () => {
     const port = 59125;
-    const manager1 = new ServerManager({ port, cacheDir: tempDir });
-    const manager2 = new ServerManager({ port, cacheDir: tempDir });
+    const manager1 = new ServerManager({ port, stateDir: tempDir });
+    const manager2 = new ServerManager({ port, stateDir: tempDir });
     const mock = await createMockHealthServer(port);
 
     try {
@@ -104,7 +104,7 @@ test("ServerManager test suite", async (t) => {
   });
 
   await t.test("stale lockfile with dead PID is cleaned up", async () => {
-    const manager = new ServerManager({ port: 59126, cacheDir: tempDir });
+    const manager = new ServerManager({ port: 59126, stateDir: tempDir });
     // Write fake lockfile with dead PID
     await manager.writeLockFile({
       pid: 99999999,
@@ -126,5 +126,50 @@ test("ServerManager test suite", async (t) => {
   await t.test("isProcessRunning accurately checks PID liveness", () => {
     assert.equal(isProcessRunning(process.pid), true);
     assert.equal(isProcessRunning(99999999), false);
+  });
+
+  await t.test("stateDir defaults to PI_CLM_STATE_DIR when set", () => {
+    const original = process.env.PI_CLM_STATE_DIR;
+    try {
+      process.env.PI_CLM_STATE_DIR = path.join(tempDir, "state-override");
+      const manager = new ServerManager({});
+      assert.equal(manager.getStateDir(), path.join(tempDir, "state-override"));
+      assert.equal(manager.getLockFilePath(), path.join(tempDir, "state-override", "server.lock"));
+    } finally {
+      if (original !== undefined) process.env.PI_CLM_STATE_DIR = original;
+      else delete process.env.PI_CLM_STATE_DIR;
+    }
+  });
+
+  await t.test("resolves model path to HF hub snapshot path", async () => {
+    const hubDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-hub-test-"));
+    const sha = "d".repeat(40);
+    const repoFolder = path.join(hubDir, "models--test--repo");
+    const manager = new ServerManager({
+      port: 59127,
+      stateDir: tempDir,
+      hubCacheDir: hubDir,
+      modelRepo: "test/repo",
+    });
+
+    // Nothing downloaded yet: provisional snapshot path named after the revision
+    assert.equal(
+      manager.getModelPath(),
+      path.join(repoFolder, "snapshots", "main")
+    );
+
+    // Once refs/main exists, the same manager resolves the real snapshot (lazy)
+    await fsp.mkdir(path.join(repoFolder, "refs"), { recursive: true });
+    await fsp.writeFile(path.join(repoFolder, "refs", "main"), sha);
+    assert.equal(
+      manager.getModelPath(),
+      path.join(repoFolder, "snapshots", sha)
+    );
+
+    // Explicit modelPath option takes precedence over HF cache resolution
+    const explicit = new ServerManager({ stateDir: tempDir, modelPath: "/explicit/model/path" });
+    assert.equal(explicit.getModelPath(), "/explicit/model/path");
+
+    await fsp.rm(hubDir, { recursive: true, force: true });
   });
 });

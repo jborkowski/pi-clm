@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import type { ClassifierModel, ClassifierContext, ClassifierOptions, ClassifierResult } from "@earendil-works/pi-ai";
 import { ServerManager, DEFAULT_PORT } from "./src/server-manager.ts";
-import { status, download, getModelPath, type ModelManagerOptions } from "./src/model-manager.ts";
+import { status, download, type ModelManagerOptions } from "./src/model-manager.ts";
 import {
   ClmStatusTracker,
   createClmStatusPanel,
@@ -29,13 +29,14 @@ export default function (pi: ExtensionAPI, extensionOptions?: ExtensionOptions) 
   const serverManager =
     extensionOptions?.serverManager ??
     new ServerManager({
-      modelPath: extensionOptions?.modelOptions ? getModelPath(extensionOptions.modelOptions) : undefined,
+      modelRepo: extensionOptions?.modelOptions?.repo,
+      hubCacheDir: extensionOptions?.modelOptions?.cacheDir,
     });
 
   const statusTracker = extensionOptions?.statusTracker ?? new ClmStatusTracker();
 
   const modelManagerOptions = (): ModelManagerOptions => ({
-    cacheDir: serverManager.getCacheDir(),
+    ...serverManager.getModelOptions(),
     ...extensionOptions?.modelOptions,
   });
 

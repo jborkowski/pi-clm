@@ -6,12 +6,19 @@ import path from "node:path";
 import os from "node:os";
 import registerPlugin, { DEFAULT_PORT, ServerManager, MANIFEST_FILENAME, ClmStatusTracker } from "../index.ts";
 
+const MOCK_COMMIT_SHA = "e".repeat(40);
+
 test("Extension index end-to-end classify test suite", async (t) => {
   const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-e2e-test-"));
-  process.env.PI_CLM_CACHE_DIR = tempDir;
+  const hubCacheDir = path.join(tempDir, "hf-hub");
+  await fsp.mkdir(hubCacheDir, { recursive: true });
+  // Keep lock/log state and HF hub cache resolution hermetic
+  process.env.PI_CLM_STATE_DIR = tempDir;
+  process.env.HF_HUB_CACHE = hubCacheDir;
 
   t.after(async () => {
-    delete process.env.PI_CLM_CACHE_DIR;
+    delete process.env.PI_CLM_STATE_DIR;
+    delete process.env.HF_HUB_CACHE;
     await fsp.rm(tempDir, { recursive: true, force: true });
   });
 
@@ -33,7 +40,10 @@ test("Extension index end-to-end classify test suite", async (t) => {
     { type: "file", path: "config.json", oid: "ece13c40d0461308f7b3d6f2252702267934bdb4", size: 12 },
   ]): Promise<http.Server> => {
     const server = http.createServer((req, res) => {
-      if (req.url?.includes("/tree/")) {
+      if (req.url?.includes("/revision/")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ sha: MOCK_COMMIT_SHA }));
+      } else if (req.url?.includes("/tree/")) {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(tree));
       } else if (req.url?.includes("/resolve/main/config.json")) {
@@ -183,26 +193,33 @@ test("Extension index end-to-end classify test suite", async (t) => {
       registeredConfig = config;
     });
 
-    const modelOptions = {
-      repo: "mlx-community/CLM-v0.1-8B-MLX-4bit",
-      hfEndpoint: `http://127.0.0.1:${mockHfPort}`,
-      cacheDir: testCache,
-    };
+    const modelRepo = "mlx-community/CLM-v0.1-8B-MLX-4bit";
     const serverManager = new ServerManager({
-      cacheDir: testCache,
+      stateDir: testCache,
+      hubCacheDir: testCache,
+      modelRepo,
       port: testServerPort,
-      modelPath: path.join(testCache, "models", "mlx-community--CLM-v0.1-8B-MLX-4bit"),
       serverScriptPath: path.resolve(process.cwd(), "test/fixtures/mock-server.py"),
     });
 
     registerPlugin(mockPi, {
       serverManager,
-      modelOptions,
+      modelOptions: {
+        repo: modelRepo,
+        hfEndpoint: `http://127.0.0.1:${mockHfPort}`,
+        cacheDir: testCache,
+      },
     });
 
     try {
       // Verify model is NOT yet downloaded in testCache
-      const manifestPath = path.join(serverManager.getModelPath(), MANIFEST_FILENAME);
+      const manifestPath = path.join(
+        testCache,
+        "models--mlx-community--CLM-v0.1-8B-MLX-4bit",
+        "snapshots",
+        MOCK_COMMIT_SHA,
+        MANIFEST_FILENAME
+      );
       const manifestBefore = await fsp.stat(manifestPath).catch(() => null);
       assert.equal(manifestBefore, null);
 
@@ -259,7 +276,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
 
     try {
       // Session 1 starts and acquires reference
-      const sm1 = new ServerManager({ cacheDir: testCache, port: serverPort });
+      const sm1 = new ServerManager({ stateDir: testCache, port: serverPort });
       await sm1.start();
       const lock1 = await sm1.readLockFile();
       assert.ok(lock1);
@@ -270,7 +287,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
       const { pi: mockPi } = makeMockPi((_id, config) => {
         registeredConfig = config;
       });
-      const sm2 = new ServerManager({ cacheDir: testCache, port: serverPort });
+      const sm2 = new ServerManager({ stateDir: testCache, port: serverPort });
       registerPlugin(mockPi, { serverManager: sm2 });
 
       const classifier = registeredConfig.classifiers["typesafe-system-one"].classify;
@@ -317,7 +334,8 @@ test("Extension index end-to-end classify test suite", async (t) => {
     const mockHf = await startMockHf(mockHfPort, []);
 
     const sm = new ServerManager({
-      cacheDir: testCache,
+      stateDir: testCache,
+      hubCacheDir: testCache,
       port: serverPort,
       serverScriptPath: path.resolve(process.cwd(), "test/fixtures/hang-server.py"),
       startupTimeoutMs: 300,
@@ -381,9 +399,10 @@ test("Extension index end-to-end classify test suite", async (t) => {
     tracker.subscribe((s) => seenStates.push(s.state));
 
     const serverManager = new ServerManager({
-      cacheDir: testCache,
+      stateDir: testCache,
+      hubCacheDir: testCache,
+      modelRepo: "mlx-community/CLM-v0.1-8B-MLX-4bit",
       port: serverPort,
-      modelPath: path.join(testCache, "models", "mlx-community--CLM-v0.1-8B-MLX-4bit"),
       serverScriptPath: path.resolve(process.cwd(), "test/fixtures/mock-server.py"),
     });
 

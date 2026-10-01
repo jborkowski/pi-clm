@@ -2,9 +2,15 @@ import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import os from "node:os";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
-import { getCacheDir, getModelPath } from "./model-manager.ts";
+import {
+  DEFAULT_REPO,
+  getHubCacheDir,
+  getModelPath as resolveHubModelPath,
+  type ModelManagerOptions,
+} from "./model-manager.ts";
 
 export const DEFAULT_PORT = 8700;
 export const DEFAULT_HOST = "127.0.0.1";
@@ -14,14 +20,24 @@ export const LOG_FILENAME = "server.log";
 export interface ServerManagerOptions {
   port?: number;
   host?: string;
+  /** Explicit model path; overrides HF hub cache resolution. */
   modelPath?: string;
-  cacheDir?: string;
+  /** Hugging Face repo id used to resolve the model snapshot (default: DEFAULT_REPO). */
+  modelRepo?: string;
+  /** Overrides the HF hub cache root (default: standard HF_HUB_CACHE / HF_HOME / ~/.cache/huggingface/hub). */
+  hubCacheDir?: string;
+  /** Directory for the lock file and server log. */
+  stateDir?: string;
   serverScriptPath?: string;
   startupTimeoutMs?: number;
   healthIntervalMs?: number;
   truncation?: "head" | "tail";
   logPath?: string;
 }
+
+/** Options with defaults applied; model path resolution stays lazy. */
+export type ResolvedServerManagerOptions = Required<Omit<ServerManagerOptions, "modelPath" | "modelRepo" | "hubCacheDir">> &
+  Pick<ServerManagerOptions, "modelPath" | "modelRepo" | "hubCacheDir">;
 
 export interface ServerLockInfo {
   pid: number;
@@ -49,6 +65,17 @@ export function isProcessRunning(pid: number): boolean {
   }
 }
 
+/** Directory for pi-clm runtime state (lock file, server log). */
+export function getDefaultStateDir(): string {
+  if (process.env.PI_CLM_STATE_DIR) {
+    return process.env.PI_CLM_STATE_DIR;
+  }
+  if (process.env.XDG_CACHE_HOME) {
+    return path.join(process.env.XDG_CACHE_HOME, "pi-clm");
+  }
+  return path.join(os.homedir(), ".cache", "pi-clm");
+}
+
 export function getDefaultServerScriptPath(): string {
   // If running in ES module
   const currentDir = path.dirname(fileURLToPath(import.meta.url));
@@ -61,7 +88,7 @@ export function getDefaultServerScriptPath(): string {
 }
 
 export class ServerManager {
-  private options: Required<ServerManagerOptions>;
+  private options: ResolvedServerManagerOptions;
   private process: ChildProcess | null = null;
   private logStream: fs.WriteStream | null = null;
   private sessionId: string;
@@ -69,23 +96,25 @@ export class ServerManager {
   private startPromise: Promise<{ pid: number; port: number; host: string }> | null = null;
 
   constructor(options: ServerManagerOptions = {}) {
-    const cacheDir = options.cacheDir ?? getCacheDir();
+    const stateDir = options.stateDir ?? getDefaultStateDir();
     this.options = {
       port: options.port ?? (process.env.PI_CLM_PORT ? parseInt(process.env.PI_CLM_PORT, 10) : DEFAULT_PORT),
-      host: options.host ?? (process.env.PI_CLM_HOST ?? DEFAULT_HOST),
-      modelPath: options.modelPath ?? getModelPath({ cacheDir }),
-      cacheDir,
+      host: options.host ?? process.env.PI_CLM_HOST ?? DEFAULT_HOST,
+      modelPath: options.modelPath,
+      modelRepo: options.modelRepo,
+      hubCacheDir: options.hubCacheDir,
+      stateDir,
       serverScriptPath: options.serverScriptPath ?? getDefaultServerScriptPath(),
       startupTimeoutMs: options.startupTimeoutMs ?? 60_000,
       healthIntervalMs: options.healthIntervalMs ?? 500,
       truncation: options.truncation ?? "head",
-      logPath: options.logPath ?? path.join(cacheDir, LOG_FILENAME),
+      logPath: options.logPath ?? path.join(stateDir, LOG_FILENAME),
     };
     this.sessionId = `session-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   }
 
   getLockFilePath(): string {
-    return path.join(this.options.cacheDir, LOCK_FILENAME);
+    return path.join(this.options.stateDir, LOCK_FILENAME);
   }
 
   getLogFilePath(): string {
@@ -96,16 +125,41 @@ export class ServerManager {
     return this.sessionId;
   }
 
-  getOptions(): Readonly<Required<ServerManagerOptions>> {
+  getOptions(): Readonly<ResolvedServerManagerOptions> {
     return this.options;
   }
 
-  getModelPath(): string {
-    return this.options.modelPath;
+  getStateDir(): string {
+    return this.options.stateDir;
   }
 
-  getCacheDir(): string {
-    return this.options.cacheDir;
+  getModelRepo(): string {
+    return this.options.modelRepo ?? DEFAULT_REPO;
+  }
+
+  /** Resolved HF hub cache root used for model storage. */
+  getHubCacheDir(): string {
+    return getHubCacheDir({ cacheDir: this.options.hubCacheDir });
+  }
+
+  /**
+   * Model path served by this manager: the HF hub snapshot directory
+   * (`models--<org>--<repo>/snapshots/<sha>`), resolved lazily on each call
+   * so it reflects a download that happened after construction.
+   */
+  getModelPath(): string {
+    return (
+      this.options.modelPath ??
+      resolveHubModelPath({ repo: this.getModelRepo(), cacheDir: this.options.hubCacheDir })
+    );
+  }
+
+  /** Model manager options consistent with this server's model configuration. */
+  getModelOptions(): ModelManagerOptions {
+    return {
+      repo: this.getModelRepo(),
+      cacheDir: this.getHubCacheDir(),
+    };
   }
 
   async checkHealth(port?: number, host?: string): Promise<ServerHealthStatus> {
@@ -161,7 +215,7 @@ export class ServerManager {
   }
 
   async writeLockFile(info: ServerLockInfo): Promise<void> {
-    await fsp.mkdir(this.options.cacheDir, { recursive: true });
+    await fsp.mkdir(this.options.stateDir, { recursive: true });
     await fsp.writeFile(this.getLockFilePath(), JSON.stringify(info, null, 2), "utf-8");
   }
 
@@ -170,7 +224,7 @@ export class ServerManager {
       pid,
       port: this.options.port,
       host: this.options.host,
-      modelPath: this.options.modelPath,
+      modelPath: this.getModelPath(),
       startedAt: new Date().toISOString(),
       refCount: 1,
       sessions: [this.sessionId],
@@ -244,8 +298,11 @@ export class ServerManager {
       return { pid: 0, port: this.options.port, host: this.options.host };
     }
 
-    // Must spawn server
-    await fsp.mkdir(this.options.cacheDir, { recursive: true });
+    // Must spawn server; resolve the model snapshot path (download already
+    // happened if the extension drove us here)
+    const modelPath = this.getModelPath();
+
+    await fsp.mkdir(this.options.stateDir, { recursive: true });
     const logFilePath = this.options.logPath;
     this.logStream = fs.createWriteStream(logFilePath, { flags: "a" });
 
@@ -255,7 +312,7 @@ export class ServerManager {
       "--port",
       this.options.port.toString(),
       "--model-path",
-      this.options.modelPath,
+      modelPath,
       "--truncation",
       this.options.truncation,
     ];
@@ -312,7 +369,7 @@ export class ServerManager {
     throw new Error(
       `CLM server startup timed out after ${this.options.startupTimeoutMs}ms. ` +
       `Check the log file at ${logFilePath}. ` +
-      `To diagnose issues manually, try running: uv run ${this.options.serverScriptPath} --port ${this.options.port} --model-path ${this.options.modelPath}`
+      `To diagnose issues manually, try running: uv run ${this.options.serverScriptPath} --port ${this.options.port} --model-path ${modelPath}`
     );
   }
 
