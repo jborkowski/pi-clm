@@ -12,13 +12,18 @@ test("Extension index end-to-end classify test suite", async (t) => {
   const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-e2e-test-"));
   const hubCacheDir = path.join(tempDir, "hf-hub");
   await fsp.mkdir(hubCacheDir, { recursive: true });
-  // Keep lock/log state and HF hub cache resolution hermetic
+  // Keep lock/log state and HF hub cache resolution hermetic. The mock-model
+  // subtests exercise the `uv run server.py` fallback; the packaged native
+  // binary (which requires the real 8B model) is covered by the dedicated
+  // native e2e test file.
   process.env.PI_CLM_STATE_DIR = tempDir;
   process.env.HF_HUB_CACHE = hubCacheDir;
+  process.env.PI_CLM_SERVER_BIN = "";
 
   t.after(async () => {
     delete process.env.PI_CLM_STATE_DIR;
     delete process.env.HF_HUB_CACHE;
+    delete process.env.PI_CLM_SERVER_BIN;
     await fsp.rm(tempDir, { recursive: true, force: true });
   });
 

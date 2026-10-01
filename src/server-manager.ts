@@ -87,6 +87,64 @@ export function getDefaultServerScriptPath(): string {
   return path.resolve(process.cwd(), "server/server.py");
 }
 
+/** Package root (the directory containing bin/, server/, src/). */
+export function getPackageRoot(): string {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+}
+
+/**
+ * Path of the pre-compiled native clm-server binary, or null when it should
+ * not be used:
+ * - `PI_CLM_SERVER_BIN` set to a path -> that path (empty string disables
+ *   the native server, forcing the `uv run server.py` fallback);
+ * - otherwise `<package root>/bin/clm-server` when present and executable.
+ */
+export function getNativeServerBinPath(): string | null {
+  if (process.env.PI_CLM_SERVER_BIN !== undefined) {
+    const override = process.env.PI_CLM_SERVER_BIN;
+    if (override === "") return null;
+    try {
+      fs.accessSync(override, fs.constants.X_OK);
+      return override;
+    } catch {
+      return null;
+    }
+  }
+  const candidate = path.join(getPackageRoot(), "bin", "clm-server");
+  try {
+    fs.accessSync(candidate, fs.constants.X_OK);
+    return candidate;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The command used to launch the CLM server: the native binary when
+ * available (zero dependencies, fast cold start), otherwise
+ * `uv run server.py`.
+ */
+export function buildServerCommand(options: {
+  port: number;
+  modelPath: string;
+  truncation: string;
+  serverScriptPath: string;
+}): { command: string; args: string[]; native: boolean } {
+  const nativeBin = getNativeServerBinPath();
+  const flagArgs = [
+    "--port",
+    options.port.toString(),
+    "--model-path",
+    options.modelPath,
+    "--truncation",
+    options.truncation,
+  ];
+  if (nativeBin) {
+    return { command: nativeBin, args: flagArgs, native: true };
+  }
+  return { command: "uv", args: ["run", options.serverScriptPath, ...flagArgs], native: false };
+}
+
 export class ServerManager {
   private options: ResolvedServerManagerOptions;
   private process: ChildProcess | null = null;
@@ -306,9 +364,7 @@ export class ServerManager {
     const logFilePath = this.options.logPath;
     this.logStream = fs.createWriteStream(logFilePath, { flags: "a" });
 
-    const args = [
-      "run",
-      this.options.serverScriptPath,
+    const serverArgs = [
       "--port",
       this.options.port.toString(),
       "--model-path",
@@ -316,8 +372,11 @@ export class ServerManager {
       "--truncation",
       this.options.truncation,
     ];
+    const nativeBin = getNativeServerBinPath();
+    const command = nativeBin ?? "uv";
+    const args = nativeBin ? serverArgs : ["run", this.options.serverScriptPath, ...serverArgs];
 
-    const child = spawn("uv", args, {
+    const child = spawn(command, args, {
       stdio: ["ignore", "pipe", "pipe"],
       detached: false,
     });
@@ -369,7 +428,7 @@ export class ServerManager {
     throw new Error(
       `CLM server startup timed out after ${this.options.startupTimeoutMs}ms. ` +
       `Check the log file at ${logFilePath}. ` +
-      `To diagnose issues manually, try running: uv run ${this.options.serverScriptPath} --port ${this.options.port} --model-path ${modelPath}`
+      `To diagnose issues manually, try running: ${command} ${args.join(" ")}`
     );
   }
 

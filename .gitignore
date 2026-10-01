@@ -13,3 +13,6 @@ __pycache__/
 *.swp
 *.swo
 *~
+
+# Swift package build artifacts
+native/clm-server/.build/

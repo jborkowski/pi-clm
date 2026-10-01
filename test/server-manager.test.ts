@@ -5,7 +5,13 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import http from "node:http";
-import { ServerManager, isProcessRunning } from "../src/server-manager.ts";
+import {
+  ServerManager,
+  isProcessRunning,
+  getNativeServerBinPath,
+  buildServerCommand,
+  getPackageRoot,
+} from "../src/server-manager.ts";
 
 function createMockHealthServer(port: number, modelName = "clm-latest"): Promise<{ server: http.Server; close: () => Promise<void> }> {
   const server = http.createServer((req, res) => {
@@ -171,5 +177,94 @@ test("ServerManager test suite", async (t) => {
     assert.equal(explicit.getModelPath(), "/explicit/model/path");
 
     await fsp.rm(hubDir, { recursive: true, force: true });
+  });
+});
+
+test("native server binary detection and preference", async (t) => {
+  const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-native-test-"));
+  const originalEnv = process.env.PI_CLM_SERVER_BIN;
+
+  const fakeBin = path.join(tempDir, "fake-clm-server");
+  await fsp.writeFile(fakeBin, "#!/bin/sh\necho \"$@\" > \"$ARGS_OUT\"\nexec python3 \"$MOCK_SERVER\" \"$@\"\n", { mode: 0o755 });
+
+  t.after(async () => {
+    if (originalEnv !== undefined) process.env.PI_CLM_SERVER_BIN = originalEnv;
+    else delete process.env.PI_CLM_SERVER_BIN;
+    await fsp.rm(tempDir, { recursive: true, force: true });
+  });
+
+  await t.test("getNativeServerBinPath honors PI_CLM_SERVER_BIN override and disable", async () => {
+    process.env.PI_CLM_SERVER_BIN = fakeBin;
+    assert.equal(getNativeServerBinPath(), fakeBin);
+
+    // non-executable / missing path falls back to null
+    process.env.PI_CLM_SERVER_BIN = path.join(tempDir, "missing-bin");
+    assert.equal(getNativeServerBinPath(), null);
+
+    // empty string disables native serving entirely
+    process.env.PI_CLM_SERVER_BIN = "";
+    assert.equal(getNativeServerBinPath(), null);
+  });
+
+  await t.test("getNativeServerBinPath finds the packaged binary when enabled", () => {
+    delete process.env.PI_CLM_SERVER_BIN;
+    const packaged = path.join(getPackageRoot(), "bin", "clm-server");
+    const exists = fs.existsSync(packaged);
+    assert.equal(getNativeServerBinPath(), exists ? packaged : null);
+  });
+
+  await t.test("buildServerCommand prefers native, falls back to uv", () => {
+    const opts = { port: 8700, modelPath: "/m", truncation: "head", serverScriptPath: "/s.py" };
+
+    process.env.PI_CLM_SERVER_BIN = fakeBin;
+    let cmd = buildServerCommand(opts);
+    assert.equal(cmd.native, true);
+    assert.equal(cmd.command, fakeBin);
+    assert.deepEqual(cmd.args, ["--port", "8700", "--model-path", "/m", "--truncation", "head"]);
+
+    process.env.PI_CLM_SERVER_BIN = "";
+    cmd = buildServerCommand(opts);
+    assert.equal(cmd.native, false);
+    assert.equal(cmd.command, "uv");
+    assert.deepEqual(cmd.args, ["run", "/s.py", "--port", "8700", "--model-path", "/m", "--truncation", "head"]);
+  });
+
+  await t.test("start() spawns the native binary and passes model path + port", async () => {
+    const port = 59128;
+    const argsFile = path.join(tempDir, "spawn-args.txt");
+    const stateDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-native-state-"));
+    const manager = new ServerManager({
+      port,
+      stateDir,
+      hubCacheDir: tempDir,
+      modelRepo: "test/repo",
+      startupTimeoutMs: 30_000,
+    });
+
+    process.env.PI_CLM_SERVER_BIN = fakeBin;
+    process.env.ARGS_OUT = argsFile;
+    process.env.MOCK_SERVER = path.resolve(process.cwd(), "test/fixtures/mock-server.py");
+    try {
+      await manager.start();
+
+      const lock = await manager.readLockFile();
+      assert.ok(lock);
+      assert.equal(lock.port, port);
+
+      const spawnedArgs = (await fsp.readFile(argsFile, "utf-8")).trim().split(/\s+/);
+      assert.ok(spawnedArgs.includes("--port"));
+      assert.equal(spawnedArgs[spawnedArgs.indexOf("--port") + 1], String(port));
+      assert.ok(spawnedArgs.includes("--model-path"));
+      const modelPath = spawnedArgs[spawnedArgs.indexOf("--model-path") + 1];
+      assert.ok(modelPath.includes("models--test--repo"), modelPath);
+      assert.ok(!spawnedArgs.includes("run"), "native spawn must not go through uv");
+
+      await manager.stop();
+    } finally {
+      delete process.env.PI_CLM_SERVER_BIN;
+      delete process.env.ARGS_OUT;
+      delete process.env.MOCK_SERVER;
+      await fsp.rm(stateDir, { recursive: true, force: true });
+    }
   });
 });
