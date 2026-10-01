@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+export * from "./src/model-manager.ts";
 
 export default function (pi: ExtensionAPI) {
   // Pi aliases this public entrypoint for extensions outside node_modules.

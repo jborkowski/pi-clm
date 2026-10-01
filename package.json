@@ -23,6 +23,7 @@
     "typescript": "^5.9.3"
   },
   "scripts": {
+    "test": "node --strip-types --test test/**/*.test.ts",
     "typecheck": "tsc --noEmit",
     "check:dup": "jscpd .",
     "lint:dup": "jscpd ."

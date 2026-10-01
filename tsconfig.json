@@ -6,9 +6,12 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
     "noEmit": true
   },
   "include": [
-    "index.ts"
+    "index.ts",
+    "src/**/*.ts",
+    "test/**/*.ts"
   ]
 }
