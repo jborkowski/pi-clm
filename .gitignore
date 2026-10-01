@@ -16,3 +16,5 @@ __pycache__/
 
 # Swift package build artifacts
 native/clm-server/.build/
+bin/
+dist/
