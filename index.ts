@@ -52,10 +52,23 @@ export default async function (pi: ExtensionAPI, extensionOptions?: ExtensionOpt
     serverManager.setModelRepo(resolveRepo(savedConfig));
   }
 
+  // The saved /clm configure choice is the single source of truth: when a
+  // programmatic modelOptions.repo was registered and a different choice is
+  // already saved, say so once instead of silently diverging.
+  const pinnedRepo = extensionOptions?.modelOptions?.repo;
+  let repoOverrideNotice: string | null = null;
+  if (pinnedRepo && savedConfig) {
+    const effectiveRepo = resolveRepo(savedConfig);
+    if (effectiveRepo !== pinnedRepo) {
+      repoOverrideNotice =
+        `CLM: using the saved /clm configure choice (${effectiveRepo}); it overrides the registered modelOptions.repo (${pinnedRepo})`;
+    }
+  }
 
   const modelManagerOptions = (): ModelManagerOptions => ({
     ...serverManager.getModelOptions(),
     ...extensionOptions?.modelOptions,
+    repo: serverManager.getModelRepo(),
   });
 
   /** Recompute tracker state from disk + health checks. */
@@ -126,6 +139,10 @@ export default async function (pi: ExtensionAPI, extensionOptions?: ExtensionOpt
   // First use: no model/quantization choice saved yet — point the user at
   // the menu without interrupting anything.
   pi.on("session_start", async (_event, ctx) => {
+    if (repoOverrideNotice) {
+      ctx.ui.notify(repoOverrideNotice, "info");
+      repoOverrideNotice = null;
+    }
     if (savedConfig) return;
     ctx.ui.notify(
       "CLM: no model variant chosen yet — run /clm configure to pick a model and quantization level (4-bit recommended for memory-constrained Macs). Using the default meanwhile.",

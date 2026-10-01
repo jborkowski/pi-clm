@@ -1,11 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import crypto from "node:crypto";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { spawn } from "node:child_process";
-import registerPlugin, { ServerManager, MANIFEST_FILENAME, ClmStatusTracker, isProcessRunning } from "../index.ts";
+import registerPlugin, {
+  ServerManager,
+  MANIFEST_FILENAME,
+  ClmStatusTracker,
+  isProcessRunning,
+  saveConfig,
+} from "../index.ts";
 import { freePort } from "./helpers.ts";
 
 const MOCK_COMMIT_SHA = "e".repeat(40);
@@ -883,6 +890,95 @@ test("Extension index end-to-end classify test suite", async (t) => {
       if (prevEnv === undefined) delete process.env.PI_CLM_STATE_DIR;
       else process.env.PI_CLM_STATE_DIR = prevEnv;
       await fsp.rm(errBase, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("saved choice overrides a pinned modelOptions.repo", async () => {
+    const overrideDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-override-cfg-"));
+    const prevEnv = process.env.PI_CLM_STATE_DIR;
+    process.env.PI_CLM_STATE_DIR = overrideDir;
+    try {
+      // A previous session saved a 4-bit choice
+      await saveConfig({ modelId: "CLM-v0.1-8B", quantizationId: "4bit" }, overrideDir);
+
+      // Fabricate a fully downloaded, valid 4-bit snapshot in the cache dir
+      const cacheDir = path.join(overrideDir, "hf-cache");
+      const repoFolder = path.join(cacheDir, "models--mlx-community--CLM-v0.1-8B-MLX-4bit");
+      const sha = "d".repeat(40);
+      const content = "{\"model_type\": \"clm\"}\n";
+      const size = Buffer.byteLength(content);
+      const oid = crypto.createHash("sha1").update(`blob ${size}\0${content}`).digest("hex");
+      const snapshotDir = path.join(repoFolder, "snapshots", sha);
+      await fsp.mkdir(snapshotDir, { recursive: true });
+      await fsp.writeFile(path.join(snapshotDir, "config.json"), content, "utf-8");
+      await fsp.writeFile(
+        path.join(snapshotDir, MANIFEST_FILENAME),
+        JSON.stringify({
+          repo: "mlx-community/CLM-v0.1-8B-MLX-4bit",
+          commitSha: sha,
+          files: [{ path: "config.json", size, oid }],
+          totalBytes: size,
+          downloadedAt: new Date().toISOString(),
+        }),
+        "utf-8"
+      );
+      await fsp.mkdir(path.join(repoFolder, "refs"), { recursive: true });
+      await fsp.writeFile(path.join(repoFolder, "refs", "main"), sha, "utf-8");
+
+      const sessionHandlers: Record<string, any> = {};
+      const commands: Record<string, any> = {};
+      const mockPi: any = {
+        registerProvider: () => {},
+        on: (event: string, handler: any) => {
+          sessionHandlers[event] = handler;
+        },
+        registerCommand: (id: string, config: any) => {
+          commands[id] = config;
+        },
+      };
+      // Embedder pins the 8-bit repo while a 4-bit choice is saved
+      await registerPlugin(mockPi, {
+        modelOptions: { repo: "mlx-community/CLM-v0.1-8B-MLX-8bit", cacheDir },
+        statusTracker: new ClmStatusTracker(),
+      });
+
+      // One clear notice about the override, and no misleading first-use notice
+      const notices: string[] = [];
+      const startCtx: any = { ui: { notify: (m: string) => notices.push(m) } };
+      await sessionHandlers["session_start"]({}, startCtx);
+      assert.ok(
+        notices.some((n) => n.includes("overrides the registered modelOptions.repo (mlx-community/CLM-v0.1-8B-MLX-8bit)")),
+        notices.join("\n")
+      );
+      assert.ok(notices.some((n) => n.includes("mlx-community/CLM-v0.1-8B-MLX-4bit")));
+      assert.ok(!notices.some((n) => n.includes("no model variant chosen yet")));
+
+      notices.length = 0;
+      await sessionHandlers["session_start"]({}, startCtx);
+      assert.equal(notices.length, 0);
+
+      // Status resolves the saved 4-bit repo (present in the cache dir), not the pinned 8-bit one
+      const statusNotices: string[] = [];
+      const ctx: any = {
+        mode: "json",
+        hasUI: false,
+        ui: {
+          notify: (m: string) => statusNotices.push(m),
+          select: async () => undefined,
+          custom: () => {},
+          setWidget: () => {},
+        },
+      };
+      await commands["clm"].handler("status", ctx);
+      assert.ok(
+        statusNotices.includes("CLM: model downloaded"),
+        statusNotices.join("\n")
+      );
+      assert.ok(!statusNotices.includes("CLM: model not downloaded"));
+    } finally {
+      if (prevEnv === undefined) delete process.env.PI_CLM_STATE_DIR;
+      else process.env.PI_CLM_STATE_DIR = prevEnv;
+      await fsp.rm(overrideDir, { recursive: true, force: true });
     }
   });
 
