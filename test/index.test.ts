@@ -144,14 +144,17 @@ test("Extension index end-to-end classify test suite", async (t) => {
     ui: { notify, select, custom: () => {}, setWidget: () => {} },
   });
 
-  /** Registers the plugin on a command-capturing mock with a fresh status tracker, runs /clm configure once (4-bit pick), and returns the tracker plus captured notifications. */
-  const runConfigureCommand = async (pluginOptions: Record<string, any> = {}) => {
+  /** Registers the plugin on a command-capturing mock with a fresh status tracker, runs /clm configure once, and returns the tracker plus captured notifications. */
+  const runConfigureCommand = async (
+    pluginOptions: Record<string, any> = {},
+    pickVariant: (title: string, options: string[]) => Promise<string | undefined> = pick4Bit
+  ) => {
     const commands: Record<string, any> = {};
     const mockPi = makeCommandPi(commands);
     const tracker = new ClmStatusTracker();
     await registerPlugin(mockPi, { ...pluginOptions, statusTracker: tracker });
     const notifications: string[] = [];
-    const ctx = makeConfigureCtx((m: string) => notifications.push(m));
+    const ctx = makeConfigureCtx((m: string) => notifications.push(m), pickVariant);
     await commands["clm"].handler("configure", ctx);
     return { tracker, notifications };
   };
@@ -794,6 +797,57 @@ test("Extension index end-to-end classify test suite", async (t) => {
     } finally {
       child.kill("SIGKILL");
       await fsp.rm(ownedDir, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("/clm configure explains the Python fallback for non-8-bit variants when a native server exists", async () => {
+    const warnDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-native-warn-"));
+    const fakeBin = path.join(warnDir, "fake-clm-server");
+    await fsp.writeFile(fakeBin, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    const prevBin = process.env.PI_CLM_SERVER_BIN;
+    const extraDirs: string[] = [];
+    try {
+      // 4-bit pick with a native binary present: plain warning, choice still applied
+      process.env.PI_CLM_SERVER_BIN = fakeBin;
+      const sm = new ServerManager({ stateDir: warnDir });
+      const { notifications } = await runConfigureCommand({ serverManager: sm });
+      assert.ok(
+        notifications.some((n) => n.includes("native server supports the 8-bit checkpoint only")),
+        notifications.join("\n")
+      );
+      assert.ok(notifications.some((n) => n.includes("Python fallback")), notifications.join("\n"));
+      assert.equal(sm.getModelRepo(), "mlx-community/CLM-v0.1-8B-MLX-4bit");
+      const saved = JSON.parse(await fsp.readFile(path.join(warnDir, "config.json"), "utf-8"));
+      assert.deepEqual(saved, { modelId: "CLM-v0.1-8B", quantizationId: "4bit" });
+
+      // Without a native binary the same pick needs no warning
+      process.env.PI_CLM_SERVER_BIN = "";
+      const plainDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-native-plain-"));
+      extraDirs.push(plainDir);
+      const noNative = await runConfigureCommand({ serverManager: new ServerManager({ stateDir: plainDir }) });
+      assert.ok(
+        !noNative.notifications.some((n) => n.includes("native server supports")),
+        noNative.notifications.join("\n")
+      );
+
+      // The 8-bit variant keeps the native server and needs no warning
+      process.env.PI_CLM_SERVER_BIN = fakeBin;
+      const bit8Dir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-native-8bit-"));
+      extraDirs.push(bit8Dir);
+      const sm8 = new ServerManager({ stateDir: bit8Dir });
+      const pick8Bit = async (_title: string, options: string[]) =>
+        options.find((o) => o.includes("8B 8-bit")) ?? options[0];
+      const eightBit = await runConfigureCommand({ serverManager: sm8 }, pick8Bit);
+      assert.ok(
+        !eightBit.notifications.some((n) => n.includes("native server supports")),
+        eightBit.notifications.join("\n")
+      );
+      assert.equal(sm8.getModelRepo(), "mlx-community/CLM-v0.1-8B-MLX-8bit");
+    } finally {
+      if (prevBin === undefined) delete process.env.PI_CLM_SERVER_BIN;
+      else process.env.PI_CLM_SERVER_BIN = prevBin;
+      await fsp.rm(warnDir, { recursive: true, force: true });
+      for (const dir of extraDirs) await fsp.rm(dir, { recursive: true, force: true });
     }
   });
 

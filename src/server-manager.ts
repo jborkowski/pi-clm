@@ -132,17 +132,26 @@ export function getNativeServerBinPath(): string | null {
 }
 
 /**
- * The command used to launch the CLM server: the native binary when
- * available (zero dependencies, fast cold start), otherwise
- * `uv run server.py`.
+ * Whether the pre-compiled native server can serve this model repo: it
+ * loads only the 8-bit group-64 checkpoint (asserted at startup), so every
+ * other quantization variant must run through the Python server.
+ */
+export function isNativeServerSupportedRepo(repo: string): boolean {
+  return repo === DEFAULT_REPO;
+}
+
+/**
+ * The command used to launch the CLM server: the native binary when one is
+ * available and can load the configured repo (zero dependencies, fast cold
+ * start), otherwise `uv run server.py`.
  */
 export function buildServerCommand(options: {
   port: number;
   modelPath: string;
   truncation: string;
   serverScriptPath: string;
+  repo: string;
 }): { command: string; args: string[]; native: boolean } {
-  const nativeBin = getNativeServerBinPath();
   const flagArgs = [
     "--port",
     options.port.toString(),
@@ -151,7 +160,8 @@ export function buildServerCommand(options: {
     "--truncation",
     options.truncation,
   ];
-  if (nativeBin) {
+  const nativeBin = getNativeServerBinPath();
+  if (nativeBin && isNativeServerSupportedRepo(options.repo)) {
     return { command: nativeBin, args: flagArgs, native: true };
   }
   return { command: "uv", args: ["run", options.serverScriptPath, ...flagArgs], native: false };
@@ -378,17 +388,13 @@ export class ServerManager {
     const logFilePath = this.options.logPath;
     this.logStream = fs.createWriteStream(logFilePath, { flags: "a" });
 
-    const serverArgs = [
-      "--port",
-      this.options.port.toString(),
-      "--model-path",
+    const { command, args } = buildServerCommand({
+      port: this.options.port,
       modelPath,
-      "--truncation",
-      this.options.truncation,
-    ];
-    const nativeBin = getNativeServerBinPath();
-    const command = nativeBin ?? "uv";
-    const args = nativeBin ? serverArgs : ["run", this.options.serverScriptPath, ...serverArgs];
+      truncation: this.options.truncation,
+      serverScriptPath: this.options.serverScriptPath,
+      repo: this.getModelRepo(),
+    });
 
     const child = spawn(command, args, {
       stdio: ["ignore", "pipe", "pipe"],

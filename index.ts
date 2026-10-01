@@ -9,7 +9,12 @@ import {
   resolveRepo,
   type ClmConfig,
 } from "./src/model-config.ts";
-import { ServerManager, DEFAULT_PORT } from "./src/server-manager.ts";
+import {
+  ServerManager,
+  DEFAULT_PORT,
+  getNativeServerBinPath,
+  isNativeServerSupportedRepo,
+} from "./src/server-manager.ts";
 import { status, download, type ModelManagerOptions } from "./src/model-manager.ts";
 import {
   ClmStatusTracker,
@@ -186,7 +191,16 @@ export default async function (pi: ExtensionAPI, extensionOptions?: ExtensionOpt
     const config: ClmConfig = { modelId: chosenModel.id, quantizationId: chosenVariant.id };
     await saveConfig(config, configStateDir);
     savedConfig = config;
-    serverManager.setModelRepo(resolveRepo(config));
+    const repo = resolveRepo(config);
+    serverManager.setModelRepo(repo);
+
+    const usesPythonFallback = !isNativeServerSupportedRepo(repo) && getNativeServerBinPath() !== null;
+    if (usesPythonFallback) {
+      await ui.notify(
+        "CLM: the native server supports the 8-bit checkpoint only — the Python fallback will be used for this variant (requires uv)",
+        "info"
+      );
+    }
 
     // A running server keeps the old model. Stopping it hands the next start
     // the new variant, but only this session's own single-owner server is
@@ -202,7 +216,9 @@ export default async function (pi: ExtensionAPI, extensionOptions?: ExtensionOpt
           " — the running server is shared with other sessions or was started externally; it keeps serving the previous variant until it stops";
       } else {
         statusTracker.set("downloaded");
-        serverNote = " — server stopped; it will start with the new variant on next use";
+        serverNote = usesPythonFallback
+          ? " — server stopped; it will start with the new variant on next use via the Python fallback"
+          : " — server stopped; it will start with the new variant on next use";
       }
     }
     await ui.notify(

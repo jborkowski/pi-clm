@@ -47,7 +47,7 @@ export const MODELS: ModelChoice[] = [
         label: "4-bit",
         weightsSize: "~4.7 GB",
         peakMemory: "~5.5 GB peak (16 GB Macs recommended)",
-        note: "Approximate: 91.4% same-top-option vs 8-bit, rising to 99.3% when the model is at least 70% confident. Borderline decisions can occasionally flip.",
+        note: "Approximate: 91.4% same-top-option vs 8-bit, rising to 99.3% when the model is at least 70% confident. Borderline decisions can occasionally flip. Served by the Python fallback (the native server supports 8-bit only; requires uv).",
         recommended: true,
       },
       {
@@ -56,7 +56,7 @@ export const MODELS: ModelChoice[] = [
         label: "5-bit",
         weightsSize: "~6 GB",
         peakMemory: "~7 GB peak (estimated)",
-        note: "Listed in the community index; details unverified.",
+        note: "Listed in the community index; details unverified. Served by the Python fallback (the native server supports 8-bit only; requires uv).",
       },
       {
         id: "8bit",

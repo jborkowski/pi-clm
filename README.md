@@ -54,7 +54,7 @@ Run `/clm configure` to pick a model and quantization level from a friendly menu
 
 The choice is persisted (in `config.json` under `PI_CLM_STATE_DIR`) and reused by later sessions. If you never open the menu, nothing changes: the existing default (8-bit) stays in effect. On first use the extension points you at `/clm configure`. After a change, a server owned solely by the current session is stopped so the next start uses the new variant; a server shared with other sessions or started externally keeps serving the previous variant until it stops.
 
-Note: the pre-compiled native server supports only the 8-bit checkpoint (see [native/clm-server](native/clm-server#constraints)); the 4-bit and 5-bit variants are served by the Python fallback — set `PI_CLM_SERVER_BIN=""` to skip a native binary (requires `uv`).
+Note: the pre-compiled native server supports only the 8-bit checkpoint (see [native/clm-server](native/clm-server#constraints)); the 4-bit and 5-bit variants are served automatically by the Python fallback, and `PI_CLM_SERVER_BIN=""` forces the Python fallback for the 8-bit checkpoint too (both require `uv`).
 
 ## Wire API
 
@@ -107,7 +107,7 @@ bin/clm-server parity test/fixtures/native-parity-reference.json \
   --model-path <model-snapshot-dir> --truncation head   # engine parity vs Python
 ```
 
-The native server is resolved as: `PI_CLM_SERVER_BIN` → packaged `bin/clm-server` → `pi-clm-server` on `PATH` (e.g. a Homebrew install) → Python fallback.
+The native server is resolved as: `PI_CLM_SERVER_BIN` → packaged `bin/clm-server` → `pi-clm-server` on `PATH` (e.g. a Homebrew install) → Python fallback. It is only used for the 8-bit checkpoint; every other quantization variant always starts the Python fallback.
 
 To rebuild everything:
 
