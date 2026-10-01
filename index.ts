@@ -135,28 +135,38 @@ export default function (pi: ExtensionAPI, extensionOptions?: ExtensionOptions) 
   pi.registerCommand("clm", {
     description: "Show CLM model/server status and start/stop controls",
     handler: async (args, ctx) => {
-      // Shortcuts: /clm start | stop | status (work in every mode)
+      // Shortcuts: /clm start | stop | status (work in every mode).
+      // In TUI the persistent status widget already reflects every state
+      // change, so notifying would duplicate the line (e.g. "CLM: ready"
+      // twice); notify only in non-TUI modes.
       const sub = (args ?? "").trim().toLowerCase();
       if (sub === "start" || sub === "stop" || sub === "status") {
+        const notify = async (message: string) => {
+          if (ctx.mode !== "tui") {
+            await ctx.ui.notify(message, "info");
+          }
+        };
         try {
           if (sub === "start") {
             await ensureReady();
-            await ctx.ui.notify("CLM: ready", "info");
+            await notify("CLM: ready");
           } else if (sub === "stop") {
             statusTracker.set("stopping");
             await serverManager.stop();
             statusTracker.set("downloaded");
-            await ctx.ui.notify("CLM: server stopped", "info");
+            await notify("CLM: server stopped");
           } else {
             await refreshStatus();
             for (const line of renderStatusLines(statusTracker.snapshot())) {
-              await ctx.ui.notify(line, "info");
+              await notify(line);
             }
           }
         } catch (err: any) {
           const message = err?.message ?? String(err);
           statusTracker.setError(message);
-          await ctx.ui.notify(`CLM: ${message}`, "error");
+          if (ctx.mode !== "tui") {
+            await ctx.ui.notify(`CLM: ${message}`, "error");
+          }
         }
         return;
       }

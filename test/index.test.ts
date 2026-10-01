@@ -518,6 +518,22 @@ test("Extension index end-to-end classify test suite", async (t) => {
     await commandConfig.handler("stop", nonTuiCtx);
     assert.ok(notifications.includes("CLM: server stopped"));
 
+    // In TUI mode the widget already shows the state: shortcuts must not
+    // notify (that printed "CLM: ready" twice)
+    const tuiNotifications: string[] = [];
+    const tuiOnlyCtx: any = {
+      mode: "tui",
+      hasUI: true,
+      ui: {
+        notify: (m: string) => tuiNotifications.push(m),
+        custom: () => {},
+        setWidget: () => {},
+      },
+    };
+    await commandConfig.handler("stop", tuiOnlyCtx);
+    await commandConfig.handler("status", tuiOnlyCtx);
+    assert.deepEqual(tuiNotifications, []);
+
     // /clm start: attaches to an already-healthy server without downloading
     // (mock on defaultPort — the port this plugin's ServerManager already has)
     const mockStart = http.createServer((req, res) => {
