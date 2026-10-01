@@ -105,68 +105,31 @@ export default function (pi: ExtensionAPI, extensionOptions?: ExtensionOptions) 
     }
   });
 
-  // Persistent status line above the editor (TUI mode only); hidden while
-  // the /clm panel is open so the status is not shown twice.
-  let panelOpen = false;
-  pi.on("session_start", (_event, ctx) => {
-    if (ctx.mode !== "tui") return;
-    ctx.ui.setWidget("clm-status", (tui, _theme) => {
-      const unsubscribe = statusTracker.subscribe(() => {
-        tui.requestRender();
-      });
-      return {
-        render(width: number): string[] {
-          if (panelOpen) return [];
-          return renderStatusLines(statusTracker.snapshot()).map((line) =>
-            line.length <= width ? line : line.slice(0, Math.max(0, width - 1)) + "…"
-          );
-        },
-        invalidate() {
-          // Stateless per-render; nothing to cache.
-        },
-        dispose() {
-          unsubscribe();
-        },
-      };
-    });
-  });
-
   // /clm — status panel and server controls
   pi.registerCommand("clm", {
     description: "Show CLM model/server status and start/stop controls",
     handler: async (args, ctx) => {
-      // Shortcuts: /clm start | stop | status (work in every mode).
-      // In TUI the persistent status widget already reflects every state
-      // change, so notifying would duplicate the line (e.g. "CLM: ready"
-      // twice); notify only in non-TUI modes.
       const sub = (args ?? "").trim().toLowerCase();
       if (sub === "start" || sub === "stop" || sub === "status") {
-        const notify = async (message: string) => {
-          if (ctx.mode !== "tui") {
-            await ctx.ui.notify(message, "info");
-          }
-        };
         try {
           if (sub === "start") {
             await ensureReady();
-            await notify("CLM: ready");
+            await ctx.ui.notify("CLM: ready", "info");
           } else if (sub === "stop") {
             statusTracker.set("stopping");
             await serverManager.stop();
             statusTracker.set("downloaded");
-            await notify("CLM: server stopped");
+            await ctx.ui.notify("CLM: server stopped", "info");
           } else {
             await refreshStatus();
             for (const line of renderStatusLines(statusTracker.snapshot())) {
-              await notify(line);
+              await ctx.ui.notify(line, "info");
             }
           }
         } catch (err: any) {
           const message = err?.message ?? String(err);
           statusTracker.setError(message);
-          if (ctx.mode !== "tui") {
-            await ctx.ui.notify(`CLM: ${message}`, "error");
-          }
+          await ctx.ui.notify(`CLM: ${message}`, "error");
         }
         return;
       }
@@ -194,16 +157,9 @@ export default function (pi: ExtensionAPI, extensionOptions?: ExtensionOptions) 
       }
 
       await refreshStatus();
-      await ctx.ui.custom<null>((tui, theme, _keybindings, done) => {
-        panelOpen = true;
-        tui.requestRender();
-        return createClmStatusPanel(statusTracker, tui, theme, actions, (result) => {
-          panelOpen = false;
-          tui.requestRender();
-          done(result);
-        });
-      });
-      panelOpen = false;
+      await ctx.ui.custom<null>((tui, theme, _keybindings, done) =>
+        createClmStatusPanel(statusTracker, tui, theme, actions, done)
+      );
     },
   });
 

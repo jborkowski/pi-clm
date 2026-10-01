@@ -460,29 +460,14 @@ test("Extension index end-to-end classify test suite", async (t) => {
   await t.test("/clm command adapts to ctx.mode and drives the TUI panel", async () => {
     let commandConfig: any = null;
     const sessionHandlers: Record<string, any> = {};
-    const mockPi: any = makeRecordingPi(sessionHandlers);
-    mockPi.registerCommand = (_id: string, config: any) => {
-      commandConfig = config;
+    const mockPi: any = {
+      registerProvider: () => {},
+      on: () => {},
+      registerCommand: (_id: string, config: any) => {
+        commandConfig = config;
+      },
     };
     registerPlugin(mockPi);
-
-    // Capture the persistent widget from the SAME plugin instance so we can
-    // assert it hides while the panel is open (no duplicated status).
-    assert.ok(sessionHandlers["session_start"]);
-    let widgetFactory: any = null;
-    await sessionHandlers["session_start"]({}, {
-      mode: "tui",
-      hasUI: true,
-      ui: {
-        setWidget: (_key: string, factory: any) => {
-          widgetFactory = factory;
-        },
-        notify: () => {},
-      },
-    });
-    assert.ok(widgetFactory);
-    const widget = widgetFactory({ requestRender: () => {} }, { fg: (_t: string, s: string) => s });
-    assert.ok(widget.render(80).some((l: string) => l.includes("CLM")));
 
     assert.ok(commandConfig);
     assert.ok(commandConfig.description.length > 0);
@@ -518,21 +503,15 @@ test("Extension index end-to-end classify test suite", async (t) => {
     await commandConfig.handler("stop", nonTuiCtx);
     assert.ok(notifications.includes("CLM: server stopped"));
 
-    // In TUI mode the widget already shows the state: shortcuts must not
-    // notify (that printed "CLM: ready" twice)
+    // Shortcuts notify in TUI too (there is no persistent widget anymore)
     const tuiNotifications: string[] = [];
     const tuiOnlyCtx: any = {
       mode: "tui",
       hasUI: true,
-      ui: {
-        notify: (m: string) => tuiNotifications.push(m),
-        custom: () => {},
-        setWidget: () => {},
-      },
+      ui: { notify: (m: string) => tuiNotifications.push(m), custom: () => {}, setWidget: () => {} },
     };
     await commandConfig.handler("stop", tuiOnlyCtx);
-    await commandConfig.handler("status", tuiOnlyCtx);
-    assert.deepEqual(tuiNotifications, []);
+    assert.ok(tuiNotifications.includes("CLM: server stopped"));
 
     // /clm start: attaches to an already-healthy server without downloading
     // (mock on defaultPort — the port this plugin's ServerManager already has)
@@ -595,60 +574,9 @@ test("Extension index end-to-end classify test suite", async (t) => {
     assert.ok(lines.every((l: string) => l.length <= 80));
     assert.ok(lines.some((l: string) => l.includes("CLM")));
 
-    // While the panel is open, the persistent widget hides (no duplicate status)
-    assert.deepEqual(widget.render(80), []);
-
     panel.handleInput("q");
     assert.deepEqual(doneResults, [null]);
-    // Once closed, the widget shows the status again
-    assert.ok(widget.render(80).some((l: string) => l.includes("CLM")));
     panel.dispose?.();
   });
 
-  await t.test("session_start registers persistent status widget only in TUI mode", async () => {
-    const sessionHandlers: Record<string, any> = {};
-    const mockPi: any = makeRecordingPi(sessionHandlers);
-    registerPlugin(mockPi);
-    assert.ok(sessionHandlers["session_start"]);
-
-    let widgetFactory: any = null;
-    const tuiCtx: any = {
-      mode: "tui",
-      hasUI: true,
-      ui: {
-        setWidget: (_key: string, factory: any) => {
-          widgetFactory = factory;
-        },
-        notify: () => {},
-      },
-    };
-    await sessionHandlers["session_start"]({}, tuiCtx);
-    assert.ok(widgetFactory);
-
-    let renderRequested = 0;
-    const widget = widgetFactory(
-      { requestRender: () => { renderRequested++; } },
-      { fg: (_t: string, s: string) => s }
-    );
-    const lines: string[] = widget.render(40);
-    assert.ok(lines.every((l: string) => l.length <= 40));
-    const before = renderRequested;
-    widget.dispose?.();
-    assert.equal(renderRequested, before);
-
-    // Non-TUI mode: no widget registered
-    let nonTuiWidgetSet = false;
-    const nonTuiCtx: any = {
-      mode: "print",
-      hasUI: false,
-      ui: {
-        setWidget: () => {
-          nonTuiWidgetSet = true;
-        },
-        notify: () => {},
-      },
-    };
-    await sessionHandlers["session_start"]({}, nonTuiCtx);
-    assert.equal(nonTuiWidgetSet, false);
-  });
 });
