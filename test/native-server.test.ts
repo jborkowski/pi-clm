@@ -54,7 +54,6 @@ test("native clm-server serves the System One wire API", async (t) => {
     child.kill("SIGTERM");
   });
 
-  // Wait for the server (includes engine load)
   const deadline = Date.now() + 120_000;
   let up = false;
   while (Date.now() < deadline) {
@@ -65,7 +64,6 @@ test("native clm-server serves the System One wire API", async (t) => {
         break;
       }
     } catch {
-      // not yet
     }
     await new Promise((r) => setTimeout(r, 250));
   }

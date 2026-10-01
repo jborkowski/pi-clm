@@ -201,28 +201,23 @@ test("createClmStatusPanel renders status and handles controls", async () => {
   assert.ok(lines2.some((l: string) => l.includes("downloading")));
   assert.ok(lines2.some((l: string) => l.includes("50%")));
 
-  // '1' triggers start action; render is requested
   const rendersBefore = renderRequested;
   panel.handleInput("1");
   await new Promise((r) => setTimeout(r, 10));
   assert.deepEqual(started, ["start"]);
   assert.ok(renderRequested > rendersBefore);
 
-  // '2' triggers stop
   panel.handleInput("2");
   await new Promise((r) => setTimeout(r, 10));
   assert.deepEqual(started, ["start", "stop"]);
 
-  // 'r' triggers refresh
   panel.handleInput("r");
   await new Promise((r) => setTimeout(r, 10));
   assert.deepEqual(started, ["start", "stop", "refresh"]);
 
-  // 'q' and ESC complete the interaction
   panel.handleInput("q");
   assert.equal(doneResult, null);
 
-  // dispose unsubscribes
   panel.dispose?.();
   assert.equal(disposed, false);
   tracker.set("ready");

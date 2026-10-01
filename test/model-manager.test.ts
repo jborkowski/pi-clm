@@ -139,7 +139,6 @@ test("model-manager test suite", async (t) => {
     // No refs yet: provisional path named after the revision
     assert.equal(getModelPath(options), path.join(repoFolder, "snapshots", DEFAULT_REVISION));
 
-    // Write refs/main and re-resolve
     await fs.mkdir(path.join(repoFolder, "refs"), { recursive: true });
     await fs.writeFile(path.join(repoFolder, "refs", DEFAULT_REVISION), MOCK_COMMIT_SHA);
     assert.equal(getModelPath(options), path.join(repoFolder, "snapshots", MOCK_COMMIT_SHA));

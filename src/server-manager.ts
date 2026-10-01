@@ -117,7 +117,6 @@ export function getNativeServerBinPath(): string | null {
     fs.accessSync(candidate, fs.constants.X_OK);
     return candidate;
   } catch {
-    // Fall back to a binary installed on PATH (e.g. Homebrew).
     for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
       if (!dir) continue;
       const onPath = path.join(dir, "pi-clm-server");
@@ -125,7 +124,6 @@ export function getNativeServerBinPath(): string | null {
         fs.accessSync(onPath, fs.constants.X_OK);
         return onPath;
       } catch {
-        // keep scanning
       }
     }
   }
@@ -307,7 +305,6 @@ export class ServerManager {
     try {
       await fsp.unlink(this.getLockFilePath());
     } catch {
-      // Ignore if absent
     }
   }
 
@@ -344,7 +341,6 @@ export class ServerManager {
   }
 
   private async doStart(): Promise<{ pid: number; port: number; host: string }> {
-    // Check if already running
     const lock = await this.readLockFile();
     if (lock) {
       if (isProcessRunning(lock.pid)) {
@@ -416,7 +412,6 @@ export class ServerManager {
 
     await this.recordLockFileForPid(pid);
 
-    // Wait for health check ready
     const startTime = Date.now();
     while (Date.now() - startTime < this.options.startupTimeoutMs) {
       const currentSpawnError = spawnError as Error | null;
@@ -453,7 +448,6 @@ export class ServerManager {
         process.kill(pid, "SIGTERM");
       }
     } catch {
-      // Ignore
     }
     await this.removeLockFile();
   }
@@ -467,7 +461,6 @@ export class ServerManager {
       return;
     }
 
-    // Remove this session from lockfile
     lock.sessions = lock.sessions.filter((s) => s !== this.sessionId);
     lock.refCount = lock.sessions.length;
 

@@ -191,7 +191,6 @@ async function fetchRepoTree(
   const files: ManifestFileEntry[] = [];
   for (const item of treeItems) {
     if (item.type !== "file") continue;
-    // Skip git repository attributes
     if (item.path === ".gitattributes") continue;
 
     files.push({
@@ -313,7 +312,6 @@ export async function download(
   const token = options?.hfToken ?? process.env.HF_TOKEN ?? process.env.HUGGING_FACE_HUB_TOKEN;
   const repoFolder = getRepoFolderPath(options);
 
-  // Check if existing cache snapshot is fully valid
   const currentStatus = await status(options);
   if (currentStatus.valid) {
     return currentStatus.modelDir;
@@ -389,7 +387,6 @@ export async function download(
 
       await pipeline(bodyStream, writeStream);
 
-      // Validate downloaded blob
       const valid = await verifyFileIntegrity(tempPath, file);
       if (!valid) {
         await fsp.unlink(tempPath).catch(() => {});
@@ -402,7 +399,6 @@ export async function download(
     await linkSnapshotEntry(blobPath, pointerPath);
   }
 
-  // Write manifest inside the snapshot
   const manifest: ModelManifest = {
     repo,
     commitSha,
@@ -443,7 +439,6 @@ export async function cleanup(options?: ModelManagerOptions & { removeCurrent?: 
       await fsp.rm(repoFolder, { recursive: true, force: true });
       removed.push(repoFolder);
     } catch {
-      // Ignore
     }
   }
 

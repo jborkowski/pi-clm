@@ -154,7 +154,7 @@ public enum JSONParser {
         }
 
         mutating func parseObject() throws -> JSONValue {
-            pos += 1 // {
+            pos += 1
             var obj = OrderedObject()
             skipWhitespace()
             if pos < bytes.count, bytes[pos] == UInt8(ascii: "}") {
@@ -184,7 +184,7 @@ public enum JSONParser {
         }
 
         mutating func parseArray() throws -> JSONValue {
-            pos += 1 // [
+            pos += 1
             var items: [JSONValue] = []
             skipWhitespace()
             if pos < bytes.count, bytes[pos] == UInt8(ascii: "]") {
@@ -204,7 +204,7 @@ public enum JSONParser {
 
         mutating func parseString() throws -> String {
             let stringStart = pos
-            pos += 1 // opening quote
+            pos += 1
             var out: [UInt8] = []
             while pos < bytes.count {
                 let b = bytes[pos]
@@ -276,7 +276,7 @@ public enum JSONParser {
 
         /// Parses the 4 hex digits after `\u`; `pos` must sit on `u`.
         mutating func parseUnicodeEscape() throws -> UInt32 {
-            pos += 1 // u
+            pos += 1
             guard pos + 4 <= bytes.count else { throw JSONError("truncated \\u escape") }
             var value: UInt32 = 0
             for _ in 0..<4 {

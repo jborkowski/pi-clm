@@ -167,31 +167,26 @@ test("Extension index end-to-end classify test suite", async (t) => {
       assert.equal(result.stopReason, "stop");
       assert.equal(result.model, "clm-latest");
 
-      // Verify choice answer
       const choiceAns = result.answers.choice_q;
       assert.equal(choiceAns.type, "choice");
       assert.equal(choiceAns.choice, "opt_a");
       assert.equal(choiceAns.confidence, 0.88);
       assert.equal(choiceAns.probabilities.opt_a, 0.88);
 
-      // Verify bool answer (mapped from wire noul)
       const boolAns = result.answers.bool_q;
       assert.equal(boolAns.type, "bool");
       assert.equal(boolAns.probability, 0.94);
 
-      // Verify score answer
       const scoreAns = result.answers.score_q;
       assert.equal(scoreAns.type, "score");
       assert.equal(scoreAns.score, 3);
       assert.equal(scoreAns.confidence, 0.77);
 
-      // Verify token usage flow
       assert.ok(result.usage);
       assert.equal(result.usage.input, 120);
       assert.equal(result.usage.output, 0);
       assert.equal(result.usage.totalTokens, 120);
 
-      // Trigger session shutdown
       for (const handler of shutdownHandlers) {
         await handler();
       }
@@ -205,7 +200,6 @@ test("Extension index end-to-end classify test suite", async (t) => {
     const mockHfPort = 8798;
     const testServerPort = 8799;
 
-    // Create mock HuggingFace server that serves model files
     const mockHf = await startMockHf(mockHfPort);
 
     let registeredConfig: any = null;
@@ -232,7 +226,6 @@ test("Extension index end-to-end classify test suite", async (t) => {
     });
 
     try {
-      // Verify model is NOT yet downloaded in testCache
       const manifestPath = path.join(
         testCache,
         "models--mlx-community--CLM-v0.1-8B-MLX-4bit",
@@ -243,7 +236,6 @@ test("Extension index end-to-end classify test suite", async (t) => {
       const manifestBefore = await fsp.stat(manifestPath).catch(() => null);
       assert.equal(manifestBefore, null);
 
-      // Invoke classify
       const classifier = registeredConfig.classifiers["typesafe-system-one"].classify;
       const model = registeredConfig.models[0];
       const result = await classifier(
@@ -258,7 +250,6 @@ test("Extension index end-to-end classify test suite", async (t) => {
       assert.equal(result.stopReason, "stop");
       assert.equal(result.answers.q.choice, "yes");
 
-      // Verify model WAS downloaded during classify call
       const manifestAfter = await fsp.stat(manifestPath).catch(() => null);
       assert.ok(manifestAfter !== null);
     } finally {
@@ -271,7 +262,6 @@ test("Extension index end-to-end classify test suite", async (t) => {
     const testCache = await fsp.mkdtemp(path.join(tempDir, "second-session-test-"));
     const serverPort = 8795;
 
-    // Start a mock server representing already running server
     let classifyCalls = 0;
     const mockRunningServer = http.createServer((req, res) => {
       if (req.url === "/health") {
@@ -295,14 +285,12 @@ test("Extension index end-to-end classify test suite", async (t) => {
     await new Promise<void>((resolve) => mockRunningServer.listen(serverPort, "127.0.0.1", resolve));
 
     try {
-      // Session 1 starts and acquires reference
       const sm1 = new ServerManager({ stateDir: testCache, port: serverPort });
       await sm1.start();
       const lock1 = await sm1.readLockFile();
       assert.ok(lock1);
       assert.equal(lock1.refCount, 1);
 
-      // Session 2 runs classify
       let registeredConfig: any = null;
       const { pi: mockPi } = makeMockPi((_id, config) => {
         registeredConfig = config;
@@ -325,18 +313,15 @@ test("Extension index end-to-end classify test suite", async (t) => {
       assert.equal(result.answers.check.choice, "ok");
       assert.equal(classifyCalls, 1);
 
-      // Lockfile should now show 2 sessions
       const lock2 = await sm2.readLockFile();
       assert.ok(lock2);
       assert.equal(lock2.refCount, 2);
 
-      // Session 2 stops
       await sm2.stop();
       const lockAfterSm2 = await sm1.readLockFile();
       assert.ok(lockAfterSm2);
       assert.equal(lockAfterSm2.refCount, 1);
 
-      // Session 1 stops
       await sm1.stop();
       const finalLock = await sm1.readLockFile();
       assert.equal(finalLock, null);
@@ -448,7 +433,6 @@ test("Extension index end-to-end classify test suite", async (t) => {
     assert.ok(seenStates.includes("downloading"), "states: " + seenStates.join(","));
     assert.ok(seenStates.includes("server-starting"), "states: " + seenStates.join(","));
 
-    // Session shutdown transitions tracker: stopping -> downloaded
     for (const handler of shutdownHandlers) {
       await handler();
     }
@@ -472,7 +456,6 @@ test("Extension index end-to-end classify test suite", async (t) => {
     assert.ok(commandConfig);
     assert.ok(commandConfig.description.length > 0);
 
-    // Non-TUI mode: graceful notify, ctx.ui.custom never called
     const notifications: string[] = [];
     let customCalled = false;
     const nonTuiCtx: any = {
@@ -492,18 +475,15 @@ test("Extension index end-to-end classify test suite", async (t) => {
     assert.ok(notifications.length > 0);
     assert.ok(notifications.some((n) => n.includes("CLM")));
 
-    // /clm status: shortcut prints status lines without opening the panel
     notifications.length = 0;
     await commandConfig.handler("status", nonTuiCtx);
     assert.equal(customCalled, false);
     assert.ok(notifications.some((n) => n.includes("not downloaded")));
 
-    // /clm stop: idempotent shortcut, notifies
     notifications.length = 0;
     await commandConfig.handler("stop", nonTuiCtx);
     assert.ok(notifications.includes("CLM: server stopped"));
 
-    // Shortcuts notify in TUI too (there is no persistent widget anymore)
     const tuiNotifications: string[] = [];
     const tuiOnlyCtx: any = {
       mode: "tui",
@@ -546,7 +526,6 @@ test("Extension index end-to-end classify test suite", async (t) => {
       await new Promise<void>((resolve) => mockStart.close(() => resolve()));
     }
 
-    // TUI mode: panel via ctx.ui.custom, component renders and handles input
     let panelFactory: any = null;
     const tuiCtx: any = {
       mode: "tui",

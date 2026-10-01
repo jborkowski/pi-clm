@@ -34,7 +34,6 @@ func runParity(referencePath: String, modelDir: URL, truncation: String) async t
     let loadSeconds = Date().timeIntervalSince(loadStart)
     print(String(format: "engine loaded in %.1fs", loadSeconds))
 
-    // heads scale
     if case .object(let headsRef)? = reference["heads"],
        case .double(let scaleRef)? = headsRef["scale"]
     {

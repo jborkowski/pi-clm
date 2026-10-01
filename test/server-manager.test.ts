@@ -74,7 +74,6 @@ test("ServerManager test suite", async (t) => {
     const mock = await createMockHealthServer(port);
 
     try {
-      // Session 1 attaches
       const res1 = await manager1.start();
       assert.equal(res1.port, port);
 
@@ -83,7 +82,6 @@ test("ServerManager test suite", async (t) => {
       assert.equal(lock.refCount, 1);
       assert.deepEqual(lock.sessions, [manager1.getSessionId()]);
 
-      // Session 2 attaches
       const res2 = await manager2.start();
       assert.equal(res2.port, port);
 
@@ -111,7 +109,6 @@ test("ServerManager test suite", async (t) => {
 
   await t.test("stale lockfile with dead PID is cleaned up", async () => {
     const manager = new ServerManager({ port: 59126, stateDir: tempDir });
-    // Write fake lockfile with dead PID
     await manager.writeLockFile({
       pid: 99999999,
       port: 59126,
@@ -124,7 +121,6 @@ test("ServerManager test suite", async (t) => {
 
     const isRunning = await manager.isRunning();
     assert.equal(isRunning, false);
-    // Lockfile should be cleaned up
     const lock = await manager.readLockFile();
     assert.equal(lock, null);
   });
