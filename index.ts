@@ -134,7 +134,33 @@ export default function (pi: ExtensionAPI, extensionOptions?: ExtensionOptions) 
   // /clm — status panel and server controls
   pi.registerCommand("clm", {
     description: "Show CLM model/server status and start/stop controls",
-    handler: async (_args, ctx) => {
+    handler: async (args, ctx) => {
+      // Shortcuts: /clm start | stop | status (work in every mode)
+      const sub = (args ?? "").trim().toLowerCase();
+      if (sub === "start" || sub === "stop" || sub === "status") {
+        try {
+          if (sub === "start") {
+            await ensureReady();
+            await ctx.ui.notify("CLM: ready", "info");
+          } else if (sub === "stop") {
+            statusTracker.set("stopping");
+            await serverManager.stop();
+            statusTracker.set("downloaded");
+            await ctx.ui.notify("CLM: server stopped", "info");
+          } else {
+            await refreshStatus();
+            for (const line of renderStatusLines(statusTracker.snapshot())) {
+              await ctx.ui.notify(line, "info");
+            }
+          }
+        } catch (err: any) {
+          const message = err?.message ?? String(err);
+          statusTracker.setError(message);
+          await ctx.ui.notify(`CLM: ${message}`, "error");
+        }
+        return;
+      }
+
       const actions: PanelActions = {
         start: () => ensureReady(),
         stop: async () => {

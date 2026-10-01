@@ -507,6 +507,50 @@ test("Extension index end-to-end classify test suite", async (t) => {
     assert.ok(notifications.length > 0);
     assert.ok(notifications.some((n) => n.includes("CLM")));
 
+    // /clm status: shortcut prints status lines without opening the panel
+    notifications.length = 0;
+    await commandConfig.handler("status", nonTuiCtx);
+    assert.equal(customCalled, false);
+    assert.ok(notifications.some((n) => n.includes("not downloaded")));
+
+    // /clm stop: idempotent shortcut, notifies
+    notifications.length = 0;
+    await commandConfig.handler("stop", nonTuiCtx);
+    assert.ok(notifications.includes("CLM: server stopped"));
+
+    // /clm start: attaches to an already-healthy server without downloading
+    // (mock on defaultPort — the port this plugin's ServerManager already has)
+    const mockStart = http.createServer((req, res) => {
+      if (req.url === "/health") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "ok", model: "clm-latest" }));
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+    await new Promise<void>((resolve) => mockStart.listen(defaultPort, "127.0.0.1", resolve));
+    try {
+      const startNotifications: string[] = [];
+      const startCtx: any = {
+        mode: "json",
+        hasUI: false,
+        ui: {
+          notify: (m: string) => startNotifications.push(m),
+          custom: () => {
+            throw new Error("custom must not be called for /clm start");
+          },
+          setWidget: () => {},
+        },
+      };
+      await commandConfig.handler("start", startCtx);
+      assert.ok(startNotifications.includes("CLM: ready"));
+      // detach cleanly so no lock outlives the subtest
+      await commandConfig.handler("stop", startCtx);
+    } finally {
+      await new Promise<void>((resolve) => mockStart.close(() => resolve()));
+    }
+
     // TUI mode: panel via ctx.ui.custom, component renders and handles input
     let panelFactory: any = null;
     const tuiCtx: any = {
