@@ -4,7 +4,7 @@ import http from "node:http";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import registerPlugin, { DEFAULT_PORT, ServerManager, MANIFEST_FILENAME } from "../index.ts";
+import registerPlugin, { DEFAULT_PORT, ServerManager, MANIFEST_FILENAME, ClmStatusTracker } from "../index.ts";
 
 test("Extension index end-to-end classify test suite", async (t) => {
   const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-e2e-test-"));
@@ -15,22 +15,47 @@ test("Extension index end-to-end classify test suite", async (t) => {
     await fsp.rm(tempDir, { recursive: true, force: true });
   });
 
+  /** Mock ExtensionAPI capturing the registered provider config and shutdown handlers. */
+  const makeMockPi = (onRegister?: (id: string, config: any) => void) => {
+    const shutdownHandlers: Array<() => Promise<void>> = [];
+    const pi: any = {
+      registerProvider: (id: string, config: any) => onRegister?.(id, config),
+      on: (event: string, handler: any) => {
+        if (event === "session_shutdown") shutdownHandlers.push(handler);
+      },
+      registerCommand: () => {},
+    };
+    return { pi, shutdownHandlers };
+  };
+
+  /** Mock HuggingFace server serving a one-file repo tree by default. */
+  const startMockHf = (port: number, tree: unknown[] = [
+    { type: "file", path: "config.json", oid: "ece13c40d0461308f7b3d6f2252702267934bdb4", size: 12 },
+  ]): Promise<http.Server> => {
+    const server = http.createServer((req, res) => {
+      if (req.url?.includes("/tree/")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(tree));
+      } else if (req.url?.includes("/resolve/main/config.json")) {
+        res.writeHead(200, { "Content-Type": "application/octet-stream" });
+        res.end("mock-config!");
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+    return new Promise((resolve) => server.listen(port, "127.0.0.1", () => resolve(server)));
+  };
+  const closeServer = (server: http.Server) => new Promise<void>((resolve) => server.close(() => resolve()));
+
   await t.test("registers provider and handles classify with choice/bool/score questions and token usage", async () => {
     let registeredProviderId = "";
     let registeredConfig: any = null;
-    const shutdownHandlers: Array<() => Promise<void>> = [];
 
-    const mockPi: any = {
-      registerProvider: (id: string, config: any) => {
-        registeredProviderId = id;
-        registeredConfig = config;
-      },
-      on: (event: string, handler: any) => {
-        if (event === "session_shutdown") {
-          shutdownHandlers.push(handler);
-        }
-      },
-    };
+    const { pi: mockPi, shutdownHandlers } = makeMockPi((id, config) => {
+      registeredProviderId = id;
+      registeredConfig = config;
+    });
 
     registerPlugin(mockPi);
 
@@ -151,31 +176,12 @@ test("Extension index end-to-end classify test suite", async (t) => {
     const testServerPort = 8799;
 
     // Create mock HuggingFace server that serves model files
-    const mockHf = http.createServer((req, res) => {
-      if (req.url === "/api/models/mlx-community/CLM-v0.1-8B-MLX-4bit/tree/main?recursive=true") {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify([
-            { type: "file", path: "config.json", oid: "ece13c40d0461308f7b3d6f2252702267934bdb4", size: 12 },
-          ])
-        );
-      } else if (req.url === "/mlx-community/CLM-v0.1-8B-MLX-4bit/resolve/main/config.json") {
-        res.writeHead(200, { "Content-Type": "application/octet-stream" });
-        res.end("mock-config!");
-      } else {
-        res.writeHead(404);
-        res.end();
-      }
-    });
-    await new Promise<void>((resolve) => mockHf.listen(mockHfPort, "127.0.0.1", resolve));
+    const mockHf = await startMockHf(mockHfPort);
 
     let registeredConfig: any = null;
-    const mockPi: any = {
-      registerProvider: (_id: string, config: any) => {
-        registeredConfig = config;
-      },
-      on: () => {},
-    };
+    const { pi: mockPi } = makeMockPi((_id, config) => {
+      registeredConfig = config;
+    });
 
     const modelOptions = {
       repo: "mlx-community/CLM-v0.1-8B-MLX-4bit",
@@ -261,12 +267,9 @@ test("Extension index end-to-end classify test suite", async (t) => {
 
       // Session 2 runs classify
       let registeredConfig: any = null;
-      const mockPi: any = {
-        registerProvider: (_id: string, config: any) => {
-          registeredConfig = config;
-        },
-        on: () => {},
-      };
+      const { pi: mockPi } = makeMockPi((_id, config) => {
+        registeredConfig = config;
+      });
       const sm2 = new ServerManager({ cacheDir: testCache, port: serverPort });
       registerPlugin(mockPi, { serverManager: sm2 });
 
@@ -311,16 +314,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
     const mockHfPort = 8797;
 
     // Mock HF server: empty file tree so download() completes instantly without network
-    const mockHf = http.createServer((req, res) => {
-      if (req.url?.includes("/tree/")) {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end("[]");
-      } else {
-        res.writeHead(404);
-        res.end();
-      }
-    });
-    await new Promise<void>((resolve) => mockHf.listen(mockHfPort, "127.0.0.1", resolve));
+    const mockHf = await startMockHf(mockHfPort, []);
 
     const sm = new ServerManager({
       cacheDir: testCache,
@@ -331,12 +325,9 @@ test("Extension index end-to-end classify test suite", async (t) => {
     });
 
     let registeredConfig: any = null;
-    const mockPi: any = {
-      registerProvider: (_id: string, config: any) => {
-        registeredConfig = config;
-      },
-      on: () => {},
-    };
+    const { pi: mockPi } = makeMockPi((_id, config) => {
+      registeredConfig = config;
+    });
 
     registerPlugin(mockPi, {
       serverManager: sm,
@@ -371,5 +362,177 @@ test("Extension index end-to-end classify test suite", async (t) => {
       }
     );
     await new Promise((resolve) => mockHf.close(resolve));
+  });
+
+  await t.test("status tracker reflects lifecycle: download -> server-starting -> ready, and error state", async () => {
+    const testCache = await fsp.mkdtemp(path.join(tempDir, "tracker-test-"));
+    const mockHfPort = 8793;
+    const serverPort = 8792;
+
+    const mockHf = await startMockHf(mockHfPort);
+
+    let registeredConfig: any = null;
+    const { pi: mockPi, shutdownHandlers } = makeMockPi((_id, config) => {
+      registeredConfig = config;
+    });
+
+    const tracker = new ClmStatusTracker();
+    const seenStates: string[] = [];
+    tracker.subscribe((s) => seenStates.push(s.state));
+
+    const serverManager = new ServerManager({
+      cacheDir: testCache,
+      port: serverPort,
+      modelPath: path.join(testCache, "models", "mlx-community--CLM-v0.1-8B-MLX-4bit"),
+      serverScriptPath: path.resolve(process.cwd(), "test/fixtures/mock-server.py"),
+    });
+
+    registerPlugin(mockPi, {
+      serverManager,
+      modelOptions: {
+        repo: "mlx-community/CLM-v0.1-8B-MLX-4bit",
+        hfEndpoint: "http://127.0.0.1:" + mockHfPort,
+        cacheDir: testCache,
+      },
+      statusTracker: tracker,
+    });
+
+    const classifier = registeredConfig.classifiers["typesafe-system-one"].classify;
+    const result = await classifier(
+      registeredConfig.models[0],
+      { state: {}, questions: { q: { type: "choice", instructions: "q?", criteria: { yes: "y" } } } },
+      { apiKey: "local" }
+    );
+    assert.equal(result.stopReason, "stop");
+    assert.equal(tracker.getState(), "ready");
+    assert.equal(tracker.snapshot().lastError, null);
+    assert.ok(seenStates.includes("downloading"), "states: " + seenStates.join(","));
+    assert.ok(seenStates.includes("server-starting"), "states: " + seenStates.join(","));
+
+    // Session shutdown transitions tracker: stopping -> downloaded
+    for (const handler of shutdownHandlers) {
+      await handler();
+    }
+    assert.equal(tracker.getState(), "downloaded");
+
+    await new Promise((resolve) => mockHf.close(resolve));
+  });
+
+  await t.test("/clm command adapts to ctx.mode and drives the TUI panel", async () => {
+    let commandConfig: any = null;
+    const mockPi: any = {
+      registerProvider: () => {},
+      on: () => {},
+      registerCommand: (_id: string, config: any) => {
+        commandConfig = config;
+      },
+    };
+    registerPlugin(mockPi);
+    assert.ok(commandConfig);
+    assert.ok(commandConfig.description.length > 0);
+
+    // Non-TUI mode: graceful notify, ctx.ui.custom never called
+    const notifications: string[] = [];
+    let customCalled = false;
+    const nonTuiCtx: any = {
+      mode: "json",
+      hasUI: false,
+      ui: {
+        notify: (m: string) => notifications.push(m),
+        custom: async () => {
+          customCalled = true;
+          throw new Error("custom must not be called in non-TUI mode");
+        },
+        setWidget: () => {},
+      },
+    };
+    await commandConfig.handler("", nonTuiCtx);
+    assert.equal(customCalled, false);
+    assert.ok(notifications.length > 0);
+    assert.ok(notifications.some((n) => n.includes("CLM")));
+
+    // TUI mode: panel via ctx.ui.custom, component renders and handles input
+    let panelFactory: any = null;
+    const tuiCtx: any = {
+      mode: "tui",
+      hasUI: true,
+      ui: {
+        notify: () => {},
+        custom: async (factory: any) => {
+          panelFactory = factory;
+          return null;
+        },
+        setWidget: () => {},
+      },
+    };
+    await commandConfig.handler("", tuiCtx);
+    assert.ok(panelFactory);
+
+    const doneResults: any[] = [];
+    const panel = panelFactory(
+      { requestRender: () => {} },
+      { fg: (_t: string, s: string) => s },
+      {},
+      (result: any) => doneResults.push(result)
+    );
+    const lines: string[] = panel.render(80);
+    assert.ok(lines.every((l: string) => l.length <= 80));
+    assert.ok(lines.some((l: string) => l.includes("CLM")));
+    panel.handleInput("q");
+    assert.deepEqual(doneResults, [null]);
+    panel.dispose?.();
+  });
+
+  await t.test("session_start registers persistent status widget only in TUI mode", async () => {
+    const sessionHandlers: Record<string, any> = {};
+    const mockPi: any = {
+      registerProvider: () => {},
+      on: (event: string, handler: any) => {
+        sessionHandlers[event] = handler;
+      },
+      registerCommand: () => {},
+    };
+    registerPlugin(mockPi);
+    assert.ok(sessionHandlers["session_start"]);
+
+    let widgetFactory: any = null;
+    const tuiCtx: any = {
+      mode: "tui",
+      hasUI: true,
+      ui: {
+        setWidget: (_key: string, factory: any) => {
+          widgetFactory = factory;
+        },
+        notify: () => {},
+      },
+    };
+    await sessionHandlers["session_start"]({}, tuiCtx);
+    assert.ok(widgetFactory);
+
+    let renderRequested = 0;
+    const widget = widgetFactory(
+      { requestRender: () => { renderRequested++; } },
+      { fg: (_t: string, s: string) => s }
+    );
+    const lines: string[] = widget.render(40);
+    assert.ok(lines.every((l: string) => l.length <= 40));
+    const before = renderRequested;
+    widget.dispose?.();
+    assert.equal(renderRequested, before);
+
+    // Non-TUI mode: no widget registered
+    let nonTuiWidgetSet = false;
+    const nonTuiCtx: any = {
+      mode: "print",
+      hasUI: false,
+      ui: {
+        setWidget: () => {
+          nonTuiWidgetSet = true;
+        },
+        notify: () => {},
+      },
+    };
+    await sessionHandlers["session_start"]({}, nonTuiCtx);
+    assert.equal(nonTuiWidgetSet, false);
   });
 });

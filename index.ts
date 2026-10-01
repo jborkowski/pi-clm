@@ -3,12 +3,20 @@ import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import type { ClassifierModel, ClassifierContext, ClassifierOptions, ClassifierResult } from "@earendil-works/pi-ai";
 import { ServerManager, DEFAULT_PORT } from "./src/server-manager.ts";
 import { status, download, getModelPath, type ModelManagerOptions } from "./src/model-manager.ts";
+import {
+  ClmStatusTracker,
+  createClmStatusPanel,
+  renderStatusLines,
+  type PanelActions,
+} from "./src/status-panel.ts";
 export * from "./src/model-manager.ts";
 export * from "./src/server-manager.ts";
+export * from "./src/status-panel.ts";
 
 export interface ExtensionOptions {
   serverManager?: ServerManager;
   modelOptions?: ModelManagerOptions;
+  statusTracker?: ClmStatusTracker;
 }
 
 export default function (pi: ExtensionAPI, extensionOptions?: ExtensionOptions) {
@@ -24,24 +32,49 @@ export default function (pi: ExtensionAPI, extensionOptions?: ExtensionOptions) 
       modelPath: extensionOptions?.modelOptions ? getModelPath(extensionOptions.modelOptions) : undefined,
     });
 
+  const statusTracker = extensionOptions?.statusTracker ?? new ClmStatusTracker();
+
+  const modelManagerOptions = (): ModelManagerOptions => ({
+    cacheDir: serverManager.getCacheDir(),
+    ...extensionOptions?.modelOptions,
+  });
+
+  /** Recompute tracker state from disk + health checks. */
+  const refreshStatus = async (): Promise<void> => {
+    if (await serverManager.isRunning()) {
+      statusTracker.set("ready");
+      return;
+    }
+    const modelStatus = await status(modelManagerOptions());
+    statusTracker.set(modelStatus.valid ? "downloaded" : "not-downloaded");
+  };
+
   // Single-flight: concurrent classify calls share one ensure/download/start attempt
   let ensureReadyPromise: Promise<void> | null = null;
   const ensureReady = async (): Promise<void> => {
     if (ensureReadyPromise) return ensureReadyPromise;
     ensureReadyPromise = (async () => {
-      const isRunning = await serverManager.isRunning();
-      if (!isRunning) {
-        // Ensure model is downloaded and verified before starting server
-        const mmOptions: ModelManagerOptions = {
-          cacheDir: serverManager.getCacheDir(),
-          ...extensionOptions?.modelOptions,
-        };
-        const modelStatus = await status(mmOptions);
-        if (!modelStatus.valid) {
-          await download(mmOptions);
+      try {
+        const isRunning = await serverManager.isRunning();
+        if (!isRunning) {
+          // Ensure model is downloaded and verified before starting server
+          const mmOptions = modelManagerOptions();
+          const modelStatus = await status(mmOptions);
+          if (!modelStatus.valid) {
+            statusTracker.set("downloading");
+            await download(mmOptions, (progress) => statusTracker.setProgress(progress));
+          }
+          statusTracker.set("downloaded");
+          statusTracker.set("server-starting");
         }
+        // start() also attaches this session to an already-running server (refCount++)
+        await serverManager.start();
+        statusTracker.set("ready");
+        statusTracker.clearError();
+      } catch (err: any) {
+        statusTracker.setError(err?.message ?? String(err));
+        throw err;
       }
-      await serverManager.start();
     })();
     try {
       return await ensureReadyPromise;
@@ -61,7 +94,70 @@ export default function (pi: ExtensionAPI, extensionOptions?: ExtensionOptions) 
   };
 
   pi.on("session_shutdown", async () => {
+    const state = statusTracker.getState();
+    if (state === "ready" || state === "server-starting") {
+      statusTracker.set("stopping");
+    }
     await serverManager.stop();
+    if (statusTracker.getState() === "stopping") {
+      statusTracker.set("downloaded");
+    }
+  });
+
+  // Persistent status line above the editor (TUI mode only)
+  pi.on("session_start", (_event, ctx) => {
+    if (ctx.mode !== "tui") return;
+    ctx.ui.setWidget("clm-status", (tui, _theme) => {
+      const unsubscribe = statusTracker.subscribe(() => {
+        tui.requestRender();
+      });
+      return {
+        render(width: number): string[] {
+          return renderStatusLines(statusTracker.snapshot()).map((line) =>
+            line.length <= width ? line : line.slice(0, Math.max(0, width - 1)) + "…"
+          );
+        },
+        invalidate() {
+          // Stateless per-render; nothing to cache.
+        },
+        dispose() {
+          unsubscribe();
+        },
+      };
+    });
+  });
+
+  // /clm — status panel and server controls
+  pi.registerCommand("clm", {
+    description: "Show CLM model/server status and start/stop controls",
+    handler: async (_args, ctx) => {
+      const actions: PanelActions = {
+        start: () => ensureReady(),
+        stop: async () => {
+          statusTracker.set("stopping");
+          await serverManager.stop();
+          statusTracker.set("downloaded");
+        },
+        refresh: async () => {
+          await refreshStatus();
+          return statusTracker.snapshot();
+        },
+      };
+
+      // Non-TUI modes: no panel, report status via notifications
+      if (ctx.mode !== "tui") {
+        await refreshStatus();
+        for (const line of renderStatusLines(statusTracker.snapshot())) {
+          ctx.ui.notify(line, "info");
+        }
+        return;
+      }
+
+      await refreshStatus();
+      await ctx.ui.custom<null>((tui, theme, _keybindings, done) =>
+        createClmStatusPanel(statusTracker, tui, theme, actions, done)
+      );
+    },
   });
 
   pi.registerProvider("clm-local", {
