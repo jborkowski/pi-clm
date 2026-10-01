@@ -66,6 +66,7 @@ export class ServerManager {
   private logStream: fs.WriteStream | null = null;
   private sessionId: string;
   private isOwner = false;
+  private startPromise: Promise<{ pid: number; port: number; host: string }> | null = null;
 
   constructor(options: ServerManagerOptions = {}) {
     const cacheDir = options.cacheDir ?? getCacheDir();
@@ -93,6 +94,18 @@ export class ServerManager {
 
   getSessionId(): string {
     return this.sessionId;
+  }
+
+  getOptions(): Readonly<Required<ServerManagerOptions>> {
+    return this.options;
+  }
+
+  getModelPath(): string {
+    return this.options.modelPath;
+  }
+
+  getCacheDir(): string {
+    return this.options.cacheDir;
   }
 
   async checkHealth(port?: number, host?: string): Promise<ServerHealthStatus> {
@@ -194,6 +207,18 @@ export class ServerManager {
   }
 
   async start(): Promise<{ pid: number; port: number; host: string }> {
+    if (this.startPromise) {
+      return this.startPromise;
+    }
+    this.startPromise = this.doStart();
+    try {
+      return await this.startPromise;
+    } finally {
+      this.startPromise = null;
+    }
+  }
+
+  private async doStart(): Promise<{ pid: number; port: number; host: string }> {
     // Check if already running
     const lock = await this.readLockFile();
     if (lock) {
@@ -284,7 +309,11 @@ export class ServerManager {
     }
 
     await this.cleanupFailedSpawn(pid);
-    throw new Error(`CLM server startup timed out after ${this.options.startupTimeoutMs}ms. Check ${logFilePath}`);
+    throw new Error(
+      `CLM server startup timed out after ${this.options.startupTimeoutMs}ms. ` +
+      `Check the log file at ${logFilePath}. ` +
+      `To diagnose issues manually, try running: uv run ${this.options.serverScriptPath} --port ${this.options.port} --model-path ${this.options.modelPath}`
+    );
   }
 
   private async cleanupFailedSpawn(pid: number): Promise<void> {
