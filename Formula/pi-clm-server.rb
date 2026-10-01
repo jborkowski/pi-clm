@@ -180,9 +180,10 @@ class PiClmServer < Formula
     spm_dep_urls.each do |url, name|
       escaped = Regexp.escape(url)
       # Match with or without a trailing ".git" and any version requirement
-      # up to the closing paren (requirement strings contain no parens).
+      # up to the manifest-statement closing paren. Requirements may contain
+      # one level of nested parens (e.g. .upToNextMajor(from: "1.0.0")).
       content.gsub!(
-        /\.package\(\s*url:\s*"#{escaped}(?:\.git)?"[^)]*\)/,
+        /\.package\(\s*url:\s*"#{escaped}(?:\.git)?"(?:\s*,\s*(?:\([^()]*\)|[^()])*)?\)/,
         ".package(path: \"#{rel}/#{name}\")"
       )
     end
