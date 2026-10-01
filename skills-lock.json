@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "skills": {
+    "code-review": {
+      "source": "jborkowski/wikiskill",
+      "sourceType": "github",
+      "skillPath": "skills/code-review/SKILL.md",
+      "computedHash": "ccbfdc5dbe51a9a8966f635b43cbcb66db4f26879691a57cbd37ffc349c1b752"
+    },
+    "domain-modeling": {
+      "source": "jborkowski/wikiskill",
+      "sourceType": "github",
+      "skillPath": "skills/domain-modeling/SKILL.md",
+      "computedHash": "800c9812771fee598f61b93df81d915316419a929fa8e3573ca96b2d028c0b5e"
+    },
+    "grilling": {
+      "source": "jborkowski/wikiskill",
+      "sourceType": "github",
+      "skillPath": "skills/grilling/SKILL.md",
+      "computedHash": "6269a44d73f24108868bbc142cd63e0bf1364c259879ea10a988395d50b5b74a"
+    },
+    "handoff": {
+      "source": "jborkowski/wikiskill",
+      "sourceType": "github",
+      "skillPath": "skills/handoff/SKILL.md",
+      "computedHash": "20654aa22f9977cd20431669bf1edac61545201b7b7d1e24ff7f61507e3d9035"
+    },
+    "implement": {
+      "source": "jborkowski/wikiskill",
+      "sourceType": "github",
+      "skillPath": "skills/implement/SKILL.md",
+      "computedHash": "e2f37ae73989eec03ffb905dbf67fdd98d2d9d2968b09fe4132a1f362758943e"
+    },
+    "issue-tracker": {
+      "source": "jborkowski/wikiskill",
+      "sourceType": "github",
+      "skillPath": "skills/issue-tracker/SKILL.md",
+      "computedHash": "6c65756945775f170213c897c463111d1a97f56c86a132b09062a886e5b837f2"
+    },
+    "research": {
+      "source": "jborkowski/wikiskill",
+      "sourceType": "github",
+      "skillPath": "skills/research/SKILL.md",
+      "computedHash": "042bbe4ee1ab480e18c8145a00ba2dcfa8511567ad163d10b5270c598adeb49b"
+    },
+    "skill-evolve": {
+      "source": "jborkowski/wikiskill",
+      "sourceType": "github",
+      "skillPath": "skills/skill-evolve/SKILL.md",
+      "computedHash": "3812c77712cdab4c12dac2393a17fb654d614ac1d66d17d6dcefae06b31e1a30"
+    },
+    "to-spec": {
+      "source": "jborkowski/wikiskill",
+      "sourceType": "github",
+      "skillPath": "skills/to-spec/SKILL.md",
+      "computedHash": "2c6bff45916b6f8e16625a8db51bf844078f1ad8a6fc65a596360b82807afa55"
+    },
+    "to-tickets": {
+      "source": "jborkowski/wikiskill",
+      "sourceType": "github",
+      "skillPath": "skills/to-tickets/SKILL.md",
+      "computedHash": "ee7727362620cc2640db6c0fab4471fffade34183acd4a7dd01eed05b7f916b6"
+    },
+    "wayfinder": {
+      "source": "jborkowski/wikiskill",
+      "sourceType": "github",
+      "skillPath": "skills/wayfinder/SKILL.md",
+      "computedHash": "0c9e2fa58952d2de65796a787d2c3f953a467a173707d824156273ec7eec9f5e"
+    }
+  }
+}
