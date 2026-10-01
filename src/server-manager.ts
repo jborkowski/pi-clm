@@ -97,7 +97,9 @@ export function getPackageRoot(): string {
  * not be used:
  * - `PI_CLM_SERVER_BIN` set to a path -> that path (empty string disables
  *   the native server, forcing the `uv run server.py` fallback);
- * - otherwise `<package root>/bin/clm-server` when present and executable.
+ * - otherwise `<package root>/bin/clm-server` when present and executable;
+ * - otherwise `pi-clm-server` found on `PATH` (e.g. Homebrew install),
+ *   resolved to its absolute path when possible.
  */
 export function getNativeServerBinPath(): string | null {
   if (process.env.PI_CLM_SERVER_BIN !== undefined) {
@@ -115,8 +117,19 @@ export function getNativeServerBinPath(): string | null {
     fs.accessSync(candidate, fs.constants.X_OK);
     return candidate;
   } catch {
-    return null;
+    // Fall back to a binary installed on PATH (e.g. Homebrew).
+    for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+      if (!dir) continue;
+      const onPath = path.join(dir, "pi-clm-server");
+      try {
+        fs.accessSync(onPath, fs.constants.X_OK);
+        return onPath;
+      } catch {
+        // keep scanning
+      }
+    }
   }
+  return null;
 }
 
 /**

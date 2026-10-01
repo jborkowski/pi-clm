@@ -209,8 +209,35 @@ test("native server binary detection and preference", async (t) => {
   await t.test("getNativeServerBinPath finds the packaged binary when enabled", () => {
     delete process.env.PI_CLM_SERVER_BIN;
     const packaged = path.join(getPackageRoot(), "bin", "clm-server");
-    const exists = fs.existsSync(packaged);
-    assert.equal(getNativeServerBinPath(), exists ? packaged : null);
+    const originalPath = process.env.PATH;
+    const originalMode = fs.existsSync(packaged) ? fs.statSync(packaged).mode : null;
+    if (originalMode !== null) fs.chmodSync(packaged, 0o644);
+    process.env.PATH = tempDir;
+    try {
+      assert.equal(getNativeServerBinPath(), null);
+    } finally {
+      if (originalMode !== null) fs.chmodSync(packaged, originalMode);
+      process.env.PATH = originalPath;
+    }
+  });
+
+  await t.test("getNativeServerBinPath falls back to pi-clm-server on PATH", () => {
+    delete process.env.PI_CLM_SERVER_BIN;
+    const binDir = path.join(tempDir, "fake-bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    const onPath = path.join(binDir, "pi-clm-server");
+    fs.writeFileSync(onPath, "#!/bin/sh\n", { mode: 0o755 });
+    const packaged = path.join(getPackageRoot(), "bin", "clm-server");
+    const originalPath = process.env.PATH;
+    const originalMode = fs.existsSync(packaged) ? fs.statSync(packaged).mode : null;
+    if (originalMode !== null) fs.chmodSync(packaged, 0o644);
+    process.env.PATH = binDir;
+    try {
+      assert.equal(getNativeServerBinPath(), onPath);
+    } finally {
+      if (originalMode !== null) fs.chmodSync(packaged, originalMode);
+      process.env.PATH = originalPath;
+    }
   });
 
   await t.test("buildServerCommand prefers native, falls back to uv", () => {
