@@ -194,7 +194,7 @@ export function createClmStatusPanel(
       const snapshot = tracker.snapshot();
       const borderLen = Math.max(0, width - 2);
       const contentWidth = Math.max(4, width - 4);
-      const source = [...renderStatusLines(snapshot), "", "Controls: 1 Start server  2 Stop server  r Refresh  q Close"];
+      const source = [...renderStatusLines(snapshot), "", "Controls: 1 Start server  2 Stop server  r Refresh  q Close  (use /clm configure to change model/quantization)"];
       const border = theme.fg("accent", `┌${"─".repeat(borderLen)}┐`);
       const bottom = theme.fg("accent", `└${"─".repeat(borderLen)}┘`);
       const body = source.map((line) => {

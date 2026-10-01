@@ -24,6 +24,7 @@ export interface ServerManagerOptions {
   modelPath?: string;
   /** Hugging Face repo id used to resolve the model snapshot (default: DEFAULT_REPO). */
   modelRepo?: string;
+
   /** Overrides the HF hub cache root (default: standard HF_HUB_CACHE / HF_HOME / ~/.cache/huggingface/hub). */
   hubCacheDir?: string;
   /** Directory for the lock file and server log. */
@@ -200,6 +201,10 @@ export class ServerManager {
 
   getStateDir(): string {
     return this.options.stateDir;
+  }
+
+  setModelRepo(repo: string | undefined): void {
+    this.options = { ...this.options, modelRepo: repo };
   }
 
   getModelRepo(): string {

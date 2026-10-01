@@ -44,6 +44,17 @@ const result = await models.classify(model, {
 
 The first call downloads the model if needed and starts the server; subsequent calls are millisecond-scale, with candidate projections cached. Run `/clm` in Pi for a status panel and server controls.
 
+## Model & quantization menu
+
+Run `/clm configure` to pick a model and quantization level from a friendly menu:
+
+- **4-bit** — ~4.7 GB download, ~5.5 GB peak memory (16 GB Macs recommended). The practical default for memory-constrained Macs. Approximate: 91.4% same-top-option vs 8-bit, rising to 99.3% when the model is at least 70% confident, so borderline decisions can occasionally flip.
+- **5-bit** — listed in the community index; details unverified.
+- **8-bit** — ~8 GB download, ~9 GB peak. Highest accuracy (99.0% agreement, essentially upstream-noise level). The out-of-the-box default.
+
+The choice is persisted (in `config.json` under `PI_CLM_STATE_DIR`) and reused by later sessions. If you never open the menu, nothing changes: the existing default (8-bit) stays in effect. On first use the extension points you at `/clm configure`; a running server is stopped after a change so the next start uses the new variant.
+
+
 ## Wire API
 
 The server speaks a "System One" API on `http://127.0.0.1:8700`:
@@ -79,7 +90,7 @@ bin/clm-server --port 8700 --model-path <model-snapshot-dir> --truncation head|t
 |---|---|---|
 | `PI_CLM_SERVER_BIN` | auto | Explicit native-server path; empty string forces the Python fallback |
 | `PI_CLM_PORT` / `PI_CLM_HOST` | `8700` / `127.0.0.1` | Server bind address |
-| `PI_CLM_STATE_DIR` | `~/.cache/pi-clm` | Lock file + log location |
+| `PI_CLM_STATE_DIR` | `~/.cache/pi-clm` | Lock file, log location, and the saved model/quantization choice |
 | `HF_HUB_CACHE`, `HF_HOME`, `XDG_CACHE_HOME` | `~/.cache/huggingface/hub` | HF hub cache resolution |
 | `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | — | Optional token for gated HF repos |
 

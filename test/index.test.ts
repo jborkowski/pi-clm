@@ -87,7 +87,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
       registeredConfig = config;
     });
 
-    registerPlugin(mockPi);
+    await registerPlugin(mockPi);
 
     assert.equal(registeredProviderId, "clm-local");
     assert.equal(registeredConfig.apiKey, "local");
@@ -216,7 +216,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
       serverScriptPath: path.resolve(process.cwd(), "test/fixtures/mock-server.py"),
     });
 
-    registerPlugin(mockPi, {
+    await registerPlugin(mockPi, {
       serverManager,
       modelOptions: {
         repo: modelRepo,
@@ -296,7 +296,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
         registeredConfig = config;
       });
       const sm2 = new ServerManager({ stateDir: testCache, port: serverPort });
-      registerPlugin(mockPi, { serverManager: sm2 });
+      await registerPlugin(mockPi, { serverManager: sm2 });
 
       const classifier = registeredConfig.classifiers["typesafe-system-one"].classify;
       const model = registeredConfig.models[0];
@@ -352,7 +352,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
       registeredConfig = config;
     });
 
-    registerPlugin(mockPi, {
+    await registerPlugin(mockPi, {
       serverManager: sm,
       modelOptions: {
         cacheDir: testCache,
@@ -411,7 +411,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
       serverScriptPath: path.resolve(process.cwd(), "test/fixtures/mock-server.py"),
     });
 
-    registerPlugin(mockPi, {
+    await registerPlugin(mockPi, {
       serverManager,
       modelOptions: {
         repo: "mlx-community/CLM-v0.1-8B-MLX-4bit",
@@ -451,7 +451,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
         commandConfig = config;
       },
     };
-    registerPlugin(mockPi);
+    await registerPlugin(mockPi);
 
     assert.ok(commandConfig);
     assert.ok(commandConfig.description.length > 0);
@@ -558,4 +558,82 @@ test("Extension index end-to-end classify test suite", async (t) => {
     panel.dispose?.();
   });
 
+  await t.test("/clm configure menu persists the choice and applies the repo", async () => {
+    const configureDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-configure-test-"));
+    const prevEnv = process.env.PI_CLM_STATE_DIR;
+    process.env.PI_CLM_STATE_DIR = configureDir;
+    try {
+      const commands: Record<string, any> = {};
+      const { pi: mockPi } = makeMockPi();
+      mockPi.registerCommand = (id: string, config: any) => {
+        commands[id] = config;
+      };
+      await registerPlugin(mockPi);
+      const commandConfig = commands["clm"];
+
+      const selections: string[] = [];
+      const notifications: string[] = [];
+      const ctx: any = {
+        mode: "json",
+        hasUI: false,
+        ui: {
+          notify: (m: string, _l: string) => notifications.push(m),
+          select: async (_title: string, options: string[]) => {
+            // Model menu: take the first entry; quantization menu: pick 4-bit
+            const pick = options.find((o) => o.includes("4-bit")) ?? options[0];
+            selections.push(pick ?? "");
+            return pick;
+          },
+          custom: () => {},
+          setWidget: () => {},
+        },
+      };
+
+      await commandConfig.handler("configure", ctx);
+
+      // Both menu levels were shown (model, then quantization)
+      assert.equal(selections.length, 2);
+      assert.match(selections[1], /4\.7 GB/);
+      assert.match(selections[1], /91\.4%/);
+      assert.ok(notifications.some((n) => n.includes("mlx-community/CLM-v0.1-8B-MLX-4bit")));
+
+      // Choice persisted in the config file
+      const saved = JSON.parse(await fsp.readFile(path.join(configureDir, "config.json"), "utf-8"));
+      assert.deepEqual(saved, { modelId: "CLM-v0.1-8B", quantizationId: "4bit" });
+
+      // A fresh session picks the saved choice up and routes the model repo accordingly
+      const sm = new ServerManager({ stateDir: configureDir });
+      const { pi: mockPi2 } = makeMockPi(() => {});
+      await registerPlugin(mockPi2, { serverManager: sm, statusTracker: new ClmStatusTracker() });
+      // Startup wiring: the persisted choice drives downloads and server starts
+      assert.equal(sm.getModelRepo(), "mlx-community/CLM-v0.1-8B-MLX-4bit");
+      assert.equal(sm.getModelOptions().repo, "mlx-community/CLM-v0.1-8B-MLX-4bit");
+      assert.match(sm.getModelPath(), /models--mlx-community--CLM-v0\.1-8B-MLX-4bit/);
+      await sm.stop();
+
+      // Cancelling at the first prompt leaves everything untouched
+      let cancelled = false;
+      const ctxCancel: any = {
+        mode: "json",
+        ui: {
+          notify: (m: string) => notifications.push(m),
+          select: async () => undefined,
+          custom: () => {},
+          setWidget: () => {},
+        },
+      };
+      await commandConfig.handler("configure", ctxCancel);
+      cancelled = true;
+      assert.ok(cancelled);
+      assert.ok(notifications.some((n) => n.includes("cancelled")));
+      const after = JSON.parse(await fsp.readFile(path.join(configureDir, "config.json"), "utf-8"));
+      assert.deepEqual(after, { modelId: "CLM-v0.1-8B", quantizationId: "4bit" });
+    } finally {
+      if (prevEnv === undefined) delete process.env.PI_CLM_STATE_DIR;
+      else process.env.PI_CLM_STATE_DIR = prevEnv;
+      await fsp.rm(configureDir, { recursive: true, force: true });
+    }
+  });
+
 });
+
