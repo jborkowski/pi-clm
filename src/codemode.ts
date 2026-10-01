@@ -122,11 +122,12 @@ export function createClm(classify: ClmClassify) {
       );
       const answer = requireAnswer(result, "q");
       if (answer.type !== "score") throw new Error(`expected a score answer, got "${answer.type}"`);
-      const label = labels[answer.score] ?? String(answer.score);
+      const index = Math.max(0, Math.min(labels.length - 1, Math.round(answer.score)));
+      const label = labels[index];
       const numeric = Number(label);
       return {
         answer: label,
-        value: Number.isFinite(numeric) ? numeric : answer.score,
+        value: Number.isFinite(numeric) ? numeric : index,
         confidence: answer.confidence,
         question,
       };

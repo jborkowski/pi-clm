@@ -108,8 +108,50 @@ test("createClm score accepts custom numeric criteria", async () => {
   assert.equal(answer.value, 0);
 });
 
+test("createClm score rounds a fractional index to the nearest criterion", async () => {
+  const clm = createClm(mockClassify({ score: { score: 2.2, confidence: 0.6 } }));
+  const answer = await clm.score("Rate severity.");
+  assert.deepEqual(answer, {
+    answer: "3",
+    value: 3,
+    confidence: 0.6,
+    question: "Rate severity.",
+  });
+});
+
+test("createClm score clamps a fractional index outside the criteria range", async () => {
+  const high = createClm(mockClassify({ score: { score: 4.7, confidence: 0.4 } }));
+  assert.deepEqual(await high.score("Rate severity."), {
+    answer: "5",
+    value: 5,
+    confidence: 0.4,
+    question: "Rate severity.",
+  });
+  const low = createClm(mockClassify({ score: { score: -0.3, confidence: 0.4 } }));
+  assert.deepEqual(await low.score("Rate severity."), {
+    answer: "1",
+    value: 1,
+    confidence: 0.4,
+    question: "Rate severity.",
+  });
+});
+
+test("createClm score maps fractional indices through custom numeric criteria", async () => {
+  const clm = createClm(mockClassify({ score: { score: 2.4, confidence: 0.7 } }));
+  const answer = await clm.score("Rate effort", [0, 2, 5, 8]);
+  assert.equal(answer.answer, "5");
+  assert.equal(answer.value, 5);
+});
+
 test("createClm score with non-numeric labels falls back to the index", async () => {
   const clm = createClm(mockClassify({ score: { score: 2, confidence: 0.5 } }));
+  const answer = await clm.score("How bad?", ["low", "medium", "high"]);
+  assert.equal(answer.answer, "high");
+  assert.equal(answer.value, 2);
+});
+
+test("createClm score with fractional non-numeric labels picks the nearest label", async () => {
+  const clm = createClm(mockClassify({ score: { score: 1.6, confidence: 0.5 } }));
   const answer = await clm.score("How bad?", ["low", "medium", "high"]);
   assert.equal(answer.answer, "high");
   assert.equal(answer.value, 2);
