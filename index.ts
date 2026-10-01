@@ -302,7 +302,10 @@ export default async function (pi: ExtensionAPI, extensionOptions?: ExtensionOpt
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   };
 
-  const clm = createClm((context) => classifyWrapper(clmModel, context));
+  // Pi requires an API key even though the loopback server does not authenticate.
+  const CLM_LOCAL_API_KEY = "local";
+
+  const clm = createClm((context) => classifyWrapper(clmModel, context, { apiKey: CLM_LOCAL_API_KEY }));
 
   // Code-mode surface (issue #9): codemode-only tools returning structured
   // JSON via outputSchema/structuredContent, so sandbox scripts call
@@ -391,7 +394,7 @@ export default async function (pi: ExtensionAPI, extensionOptions?: ExtensionOpt
   });
 
   pi.registerProvider("clm-local", {
-    apiKey: "local", // Pi requires a key; the loopback server does not authenticate.
+    apiKey: CLM_LOCAL_API_KEY,
     models: [clmModel],
     classifiers: { "typesafe-system-one": { classify: classifyWrapper } },
   });

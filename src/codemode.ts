@@ -122,6 +122,11 @@ export function createClm(classify: ClmClassify) {
       );
       const answer = requireAnswer(result, "q");
       if (answer.type !== "score") throw new Error(`expected a score answer, got "${answer.type}"`);
+      // The wire protocol reports a continuous expected index (sum(i * p_i)
+      // over softmax probabilities), which is fractional for every real
+      // distribution. Round and clamp to the nearest criterion so `answer` is
+      // a real label and `value` stays on the criteria scale (numeric label
+      // when parseable, else the 0-based index).
       const index = Math.max(0, Math.min(labels.length - 1, Math.round(answer.score)));
       const label = labels[index];
       const numeric = Number(label);
