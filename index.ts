@@ -3,8 +3,6 @@ import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import type { ClassifierModel, ClassifierContext, ClassifierOptions, ClassifierResult } from "@earendil-works/pi-ai";
 import {
   MODELS,
-  findModel,
-  findVariant,
   formatVariantLine,
   loadConfig,
   saveConfig,
@@ -49,7 +47,7 @@ export default async function (pi: ExtensionAPI, extensionOptions?: ExtensionOpt
   // Apply a persisted model/quantization choice on startup. When the menu
   // was never opened there is no config file and defaults stay untouched.
   const configStateDir = serverManager.getStateDir();
-  const savedConfig = await loadConfig(configStateDir);
+  let savedConfig = await loadConfig(configStateDir);
   if (savedConfig) {
     serverManager.setModelRepo(resolveRepo(savedConfig));
   }
@@ -145,8 +143,7 @@ export default async function (pi: ExtensionAPI, extensionOptions?: ExtensionOpt
    * Friendly model/quantization selection menu. Persists the choice in the
    * extension config and applies it to future downloads and server starts.
    */
-  const runConfigureMenu = async (ui: ConfigureUI, current: ClmConfig | null): Promise<void> => {
-    const model = findModel(current?.modelId ?? MODELS[0].id) ?? MODELS[0];
+  const runConfigureMenu = async (ui: ConfigureUI): Promise<void> => {
     const modelChoice = await ui.select(
       "CLM: choose a model",
       MODELS.map((m) => m.label)
@@ -155,7 +152,7 @@ export default async function (pi: ExtensionAPI, extensionOptions?: ExtensionOpt
       await ui.notify("CLM: configuration cancelled", "info");
       return;
     }
-    const chosenModel = MODELS.find((m) => m.label === modelChoice) ?? model;
+    const chosenModel = MODELS.find((m) => m.label === modelChoice)!;
 
     const variantChoice = await ui.select(
       `CLM: choose a quantization level for ${chosenModel.label}`,
@@ -165,24 +162,34 @@ export default async function (pi: ExtensionAPI, extensionOptions?: ExtensionOpt
       await ui.notify("CLM: configuration cancelled", "info");
       return;
     }
-    const chosenVariant =
-      chosenModel.variants.find((v) => formatVariantLine(chosenModel, v) === variantChoice) ??
-      chosenModel.variants[0];
+    const chosenVariant = chosenModel.variants.find(
+      (v) => formatVariantLine(chosenModel, v) === variantChoice
+    )!;
 
     const config: ClmConfig = { modelId: chosenModel.id, quantizationId: chosenVariant.id };
     await saveConfig(config, configStateDir);
+    savedConfig = config;
     serverManager.setModelRepo(resolveRepo(config));
 
-    // A running server keeps the old model; restart so the choice applies now.
-    const wasRunning = await serverManager.isRunning();
-    if (wasRunning) {
+    // A running server keeps the old model. Stopping it hands the next start
+    // the new variant, but only this session's own single-owner server is
+    // stopped; a server shared with other sessions or started externally
+    // keeps serving the previous variant until it stops.
+    let serverNote = "";
+    if (await serverManager.isRunning()) {
       statusTracker.set("stopping");
       await serverManager.stop();
-      statusTracker.set("downloaded");
+      if (await serverManager.isRunning()) {
+        statusTracker.set("ready");
+        serverNote =
+          " — the running server is shared with other sessions or was started externally; it keeps serving the previous variant until it stops";
+      } else {
+        statusTracker.set("downloaded");
+        serverNote = " — server stopped; it will start with the new variant on next use";
+      }
     }
     await ui.notify(
-      `CLM: set to ${chosenModel.label} ${chosenVariant.label} (${chosenVariant.repo})` +
-        (wasRunning ? " — server stopped; it will start with the new variant on next use" : ""),
+      `CLM: set to ${chosenModel.label} ${chosenVariant.label} (${chosenVariant.repo})${serverNote}`,
       "info"
     );
   };
@@ -192,13 +199,11 @@ export default async function (pi: ExtensionAPI, extensionOptions?: ExtensionOpt
     description: "Show CLM model/server status and start/stop controls",
     handler: async (args, ctx) => {
       const sub = (args ?? "").trim().toLowerCase();
-      if (sub === "configure") {
-        await runConfigureMenu(ctx.ui, savedConfig);
-        return;
-      }
-      if (sub === "start" || sub === "stop" || sub === "status") {
+      if (sub === "configure" || sub === "start" || sub === "stop" || sub === "status") {
         try {
-          if (sub === "start") {
+          if (sub === "configure") {
+            await runConfigureMenu(ctx.ui);
+          } else if (sub === "start") {
             await ensureReady();
             await ctx.ui.notify("CLM: ready", "info");
           } else if (sub === "stop") {

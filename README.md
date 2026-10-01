@@ -52,7 +52,7 @@ Run `/clm configure` to pick a model and quantization level from a friendly menu
 - **5-bit** — listed in the community index; details unverified.
 - **8-bit** — ~8 GB download, ~9 GB peak. Highest accuracy (99.0% agreement, essentially upstream-noise level). The out-of-the-box default.
 
-The choice is persisted (in `config.json` under `PI_CLM_STATE_DIR`) and reused by later sessions. If you never open the menu, nothing changes: the existing default (8-bit) stays in effect. On first use the extension points you at `/clm configure`; a running server is stopped after a change so the next start uses the new variant.
+The choice is persisted (in `config.json` under `PI_CLM_STATE_DIR`) and reused by later sessions. If you never open the menu, nothing changes: the existing default (8-bit) stays in effect. On first use the extension points you at `/clm configure`. After a change, a server owned solely by the current session is stopped so the next start uses the new variant; a server shared with other sessions or started externally keeps serving the previous variant until it stops.
 
 
 ## Wire API

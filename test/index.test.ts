@@ -4,7 +4,8 @@ import http from "node:http";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import registerPlugin, { ServerManager, MANIFEST_FILENAME, ClmStatusTracker } from "../index.ts";
+import { spawn } from "node:child_process";
+import registerPlugin, { ServerManager, MANIFEST_FILENAME, ClmStatusTracker, isProcessRunning } from "../index.ts";
 import { freePort } from "./helpers.ts";
 
 const MOCK_COMMIT_SHA = "e".repeat(40);
@@ -77,6 +78,36 @@ test("Extension index end-to-end classify test suite", async (t) => {
     return new Promise((resolve) => server.listen(port, "127.0.0.1", () => resolve(server)));
   };
   const closeServer = (server: http.Server) => new Promise<void>((resolve) => server.close(() => resolve()));
+
+  /** Real child process answering /health, standing in for a running CLM server. */
+  const spawnHealthServer = (port: number) =>
+    spawn(
+      process.execPath,
+      [
+        "-e",
+        `const http=require("http");http.createServer((req,res)=>{if(req.url==="/health"){res.writeHead(200,{"Content-Type":"application/json"});res.end(JSON.stringify({status:"ok",model:"clm-latest"}));}else{res.writeHead(404);res.end();}}).listen(${port},"127.0.0.1");`,
+      ],
+      { stdio: "ignore" }
+    );
+
+  const waitForServer = async (port: number): Promise<void> => {
+    for (let i = 0; i < 100; i++) {
+      const ok = await new Promise<boolean>((resolve) => {
+        const req = http.get({ host: "127.0.0.1", port, path: "/health", timeout: 500 }, (res) => {
+          resolve(res.statusCode === 200);
+          res.resume();
+        });
+        req.on("error", () => resolve(false));
+        req.on("timeout", () => {
+          req.destroy();
+          resolve(false);
+        });
+      });
+      if (ok) return;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    throw new Error(`health server on port ${port} never came up`);
+  };
 
   await t.test("registers provider and handles classify with choice/bool/score questions and token usage", async () => {
     let registeredProviderId = "";
@@ -632,6 +663,226 @@ test("Extension index end-to-end classify test suite", async (t) => {
       if (prevEnv === undefined) delete process.env.PI_CLM_STATE_DIR;
       else process.env.PI_CLM_STATE_DIR = prevEnv;
       await fsp.rm(configureDir, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("/clm configure warns when a shared server keeps serving the old variant", async () => {
+    const sharedDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-shared-cfg-"));
+    const port = await freePort();
+    const child = spawnHealthServer(port);
+    try {
+      await waitForServer(port);
+
+      const sm = new ServerManager({ stateDir: sharedDir, port });
+      await sm.writeLockFile({
+        pid: child.pid!,
+        port,
+        host: "127.0.0.1",
+        modelPath: "/models--mlx-community--CLM-v0.1-8B-MLX-8bit",
+        startedAt: new Date().toISOString(),
+        refCount: 2,
+        sessions: [sm.getSessionId(), "session-other"],
+      });
+
+      const commands: Record<string, any> = {};
+      const mockPi: any = {
+        registerProvider: () => {},
+        on: () => {},
+        registerCommand: (id: string, config: any) => {
+          commands[id] = config;
+        },
+      };
+      const tracker = new ClmStatusTracker();
+      await registerPlugin(mockPi, { serverManager: sm, statusTracker: tracker });
+
+      const notifications: string[] = [];
+      const ctx: any = {
+        mode: "json",
+        hasUI: false,
+        ui: {
+          notify: (m: string) => notifications.push(m),
+          select: async (_title: string, options: string[]) =>
+            options.find((o) => o.includes("4-bit")) ?? options[0],
+          custom: () => {},
+          setWidget: () => {},
+        },
+      };
+      await commands["clm"].handler("configure", ctx);
+
+      // Told plainly: the old variant keeps serving until that server stops
+      assert.ok(
+        notifications.some((n) => n.includes("keeps serving the previous variant until it stops")),
+        notifications.join("\n")
+      );
+      assert.ok(!notifications.some((n) => n.includes("server stopped; it will start")));
+
+      // The shared server was not killed and the other session keeps its lock entry
+      assert.equal(child.exitCode, null);
+      assert.equal(tracker.getState(), "ready");
+      const lock = await sm.readLockFile();
+      assert.ok(lock);
+      assert.deepEqual(lock!.sessions, ["session-other"]);
+      assert.equal(lock!.refCount, 1);
+      assert.equal(sm.getModelRepo(), "mlx-community/CLM-v0.1-8B-MLX-4bit");
+      const saved = JSON.parse(await fsp.readFile(path.join(sharedDir, "config.json"), "utf-8"));
+      assert.deepEqual(saved, { modelId: "CLM-v0.1-8B", quantizationId: "4bit" });
+    } finally {
+      child.kill("SIGKILL");
+      await fsp.rm(sharedDir, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("/clm configure stops a solely owned server for the new variant", async () => {
+    const ownedDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-owned-cfg-"));
+    const port = await freePort();
+    const child = spawnHealthServer(port);
+    try {
+      await waitForServer(port);
+
+      const sm = new ServerManager({ stateDir: ownedDir, port });
+      await sm.writeLockFile({
+        pid: child.pid!,
+        port,
+        host: "127.0.0.1",
+        modelPath: "/models--mlx-community--CLM-v0.1-8B-MLX-8bit",
+        startedAt: new Date().toISOString(),
+        refCount: 1,
+        sessions: [sm.getSessionId()],
+      });
+
+      const commands: Record<string, any> = {};
+      const mockPi: any = {
+        registerProvider: () => {},
+        on: () => {},
+        registerCommand: (id: string, config: any) => {
+          commands[id] = config;
+        },
+      };
+      const tracker = new ClmStatusTracker();
+      await registerPlugin(mockPi, { serverManager: sm, statusTracker: tracker });
+
+      const notifications: string[] = [];
+      const ctx: any = {
+        mode: "json",
+        hasUI: false,
+        ui: {
+          notify: (m: string) => notifications.push(m),
+          select: async (_title: string, options: string[]) =>
+            options.find((o) => o.includes("4-bit")) ?? options[0],
+          custom: () => {},
+          setWidget: () => {},
+        },
+      };
+      await commands["clm"].handler("configure", ctx);
+
+      assert.ok(
+        notifications.some((n) => n.includes("server stopped; it will start with the new variant on next use")),
+        notifications.join("\n")
+      );
+      assert.equal(await sm.readLockFile(), null);
+      assert.equal(tracker.getState(), "downloaded");
+      for (let i = 0; i < 40 && isProcessRunning(child.pid!); i++) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.equal(isProcessRunning(child.pid!), false);
+    } finally {
+      child.kill("SIGKILL");
+      await fsp.rm(ownedDir, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("first-use notice disappears once a choice is saved", async () => {
+    const noticeDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-notice-"));
+    const prevEnv = process.env.PI_CLM_STATE_DIR;
+    process.env.PI_CLM_STATE_DIR = noticeDir;
+    try {
+      const sessionHandlers: Record<string, any> = {};
+      const commands: Record<string, any> = {};
+      const mockPi: any = {
+        registerProvider: () => {},
+        on: (event: string, handler: any) => {
+          sessionHandlers[event] = handler;
+        },
+        registerCommand: (id: string, config: any) => {
+          commands[id] = config;
+        },
+      };
+      await registerPlugin(mockPi);
+
+      const notices: string[] = [];
+      const startCtx: any = { ui: { notify: (m: string) => notices.push(m) } };
+
+      await sessionHandlers["session_start"]({}, startCtx);
+      assert.ok(notices.some((n) => n.includes("no model variant chosen yet")), notices.join("\n"));
+
+      notices.length = 0;
+      const ctx: any = {
+        mode: "json",
+        hasUI: false,
+        ui: {
+          notify: (m: string) => notices.push(m),
+          select: async (_title: string, options: string[]) =>
+            options.find((o) => o.includes("4-bit")) ?? options[0],
+          custom: () => {},
+          setWidget: () => {},
+        },
+      };
+      await commands["clm"].handler("configure", ctx);
+      assert.ok(notices.some((n) => n.includes("mlx-community/CLM-v0.1-8B-MLX-4bit")));
+
+      notices.length = 0;
+      await sessionHandlers["session_start"]({}, startCtx);
+      assert.equal(notices.length, 0);
+    } finally {
+      if (prevEnv === undefined) delete process.env.PI_CLM_STATE_DIR;
+      else process.env.PI_CLM_STATE_DIR = prevEnv;
+      await fsp.rm(noticeDir, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("/clm configure failures surface through the CLM error channel", async () => {
+    const errBase = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-cfg-err-"));
+    // A state dir occupied by a regular file makes every config write fail
+    const statePath = path.join(errBase, "not-a-dir");
+    await fsp.writeFile(statePath, "occupied", "utf-8");
+    const prevEnv = process.env.PI_CLM_STATE_DIR;
+    process.env.PI_CLM_STATE_DIR = statePath;
+    try {
+      const commands: Record<string, any> = {};
+      const mockPi: any = {
+        registerProvider: () => {},
+        on: () => {},
+        registerCommand: (id: string, config: any) => {
+          commands[id] = config;
+        },
+      };
+      const tracker = new ClmStatusTracker();
+      await registerPlugin(mockPi, { statusTracker: tracker });
+
+      const notified: Array<{ message: string; level: string }> = [];
+      const ctx: any = {
+        mode: "json",
+        hasUI: false,
+        ui: {
+          notify: (m: string, level: string) => notified.push({ message: m, level }),
+          select: async (_title: string, options: string[]) =>
+            options.find((o) => o.includes("4-bit")) ?? options[0],
+          custom: () => {},
+          setWidget: () => {},
+        },
+      };
+      // Resolves instead of rejecting: the handler reports the failure itself
+      await commands["clm"].handler("configure", ctx);
+
+      assert.equal(notified.length, 1);
+      assert.equal(notified[0].level, "error");
+      assert.ok(notified[0].message.startsWith("CLM: "), notified[0].message);
+      assert.equal(tracker.getState(), "error");
+      assert.equal(tracker.snapshot().lastError, notified[0].message.slice("CLM: ".length));
+    } finally {
+      if (prevEnv === undefined) delete process.env.PI_CLM_STATE_DIR;
+      else process.env.PI_CLM_STATE_DIR = prevEnv;
+      await fsp.rm(errBase, { recursive: true, force: true });
     }
   });
 
