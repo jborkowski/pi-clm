@@ -1,0 +1,350 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+import path from "node:path";
+import http from "node:http";
+import { fileURLToPath } from "node:url";
+import { getCacheDir, getModelPath } from "./model-manager.ts";
+
+export const DEFAULT_PORT = 8700;
+export const DEFAULT_HOST = "127.0.0.1";
+export const LOCK_FILENAME = "server.lock";
+export const LOG_FILENAME = "server.log";
+
+export interface ServerManagerOptions {
+  port?: number;
+  host?: string;
+  modelPath?: string;
+  cacheDir?: string;
+  serverScriptPath?: string;
+  startupTimeoutMs?: number;
+  healthIntervalMs?: number;
+  truncation?: "head" | "tail";
+  logPath?: string;
+}
+
+export interface ServerLockInfo {
+  pid: number;
+  port: number;
+  host: string;
+  modelPath: string;
+  startedAt: string;
+  refCount: number;
+  sessions: string[];
+}
+
+export interface ServerHealthStatus {
+  ok: boolean;
+  status?: string;
+  model?: string;
+  error?: string;
+}
+
+export function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err: any) {
+    return err.code === "EPERM";
+  }
+}
+
+export function getDefaultServerScriptPath(): string {
+  // If running in ES module
+  const currentDir = path.dirname(fileURLToPath(import.meta.url));
+  const serverPath = path.resolve(currentDir, "../server/server.py");
+  if (fs.existsSync(serverPath)) {
+    return serverPath;
+  }
+  // Fallback to local server dir if running from root
+  return path.resolve(process.cwd(), "server/server.py");
+}
+
+export class ServerManager {
+  private options: Required<ServerManagerOptions>;
+  private process: ChildProcess | null = null;
+  private logStream: fs.WriteStream | null = null;
+  private sessionId: string;
+  private isOwner = false;
+
+  constructor(options: ServerManagerOptions = {}) {
+    const cacheDir = options.cacheDir ?? getCacheDir();
+    this.options = {
+      port: options.port ?? (process.env.PI_CLM_PORT ? parseInt(process.env.PI_CLM_PORT, 10) : DEFAULT_PORT),
+      host: options.host ?? (process.env.PI_CLM_HOST ?? DEFAULT_HOST),
+      modelPath: options.modelPath ?? getModelPath({ cacheDir }),
+      cacheDir,
+      serverScriptPath: options.serverScriptPath ?? getDefaultServerScriptPath(),
+      startupTimeoutMs: options.startupTimeoutMs ?? 60_000,
+      healthIntervalMs: options.healthIntervalMs ?? 500,
+      truncation: options.truncation ?? "head",
+      logPath: options.logPath ?? path.join(cacheDir, LOG_FILENAME),
+    };
+    this.sessionId = `session-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  getLockFilePath(): string {
+    return path.join(this.options.cacheDir, LOCK_FILENAME);
+  }
+
+  getLogFilePath(): string {
+    return this.options.logPath;
+  }
+
+  getSessionId(): string {
+    return this.sessionId;
+  }
+
+  async checkHealth(port?: number, host?: string): Promise<ServerHealthStatus> {
+    const targetPort = port ?? this.options.port;
+    const targetHost = host ?? this.options.host;
+    return new Promise((resolve) => {
+      const req = http.get(
+        {
+          host: targetHost,
+          port: targetPort,
+          path: "/health",
+          timeout: 2000,
+        },
+        (res) => {
+          let data = "";
+          res.on("data", (chunk) => {
+            data += chunk;
+          });
+          res.on("end", () => {
+            try {
+              if (res.statusCode === 200) {
+                const json = JSON.parse(data);
+                resolve({ ok: true, status: json.status, model: json.model });
+              } else {
+                resolve({ ok: false, error: `HTTP ${res.statusCode}` });
+              }
+            } catch (err: any) {
+              resolve({ ok: false, error: err.message });
+            }
+          });
+        }
+      );
+
+      req.on("error", (err: any) => {
+        resolve({ ok: false, error: err.message });
+      });
+
+      req.on("timeout", () => {
+        req.destroy();
+        resolve({ ok: false, error: "Health check timed out" });
+      });
+    });
+  }
+
+  async readLockFile(): Promise<ServerLockInfo | null> {
+    try {
+      const content = await fsp.readFile(this.getLockFilePath(), "utf-8");
+      const info = JSON.parse(content) as ServerLockInfo;
+      return info;
+    } catch {
+      return null;
+    }
+  }
+
+  async writeLockFile(info: ServerLockInfo): Promise<void> {
+    await fsp.mkdir(this.options.cacheDir, { recursive: true });
+    await fsp.writeFile(this.getLockFilePath(), JSON.stringify(info, null, 2), "utf-8");
+  }
+
+  private async recordLockFileForPid(pid: number): Promise<void> {
+    const lockInfo: ServerLockInfo = {
+      pid,
+      port: this.options.port,
+      host: this.options.host,
+      modelPath: this.options.modelPath,
+      startedAt: new Date().toISOString(),
+      refCount: 1,
+      sessions: [this.sessionId],
+    };
+    await this.writeLockFile(lockInfo);
+  }
+
+  async removeLockFile(): Promise<void> {
+    try {
+      await fsp.unlink(this.getLockFilePath());
+    } catch {
+      // Ignore if absent
+    }
+  }
+
+  async isRunning(): Promise<boolean> {
+    const lock = await this.readLockFile();
+    if (!lock) {
+      const health = await this.checkHealth();
+      return health.ok;
+    }
+
+    if (!isProcessRunning(lock.pid)) {
+      await this.removeLockFile();
+      return false;
+    }
+
+    const health = await this.checkHealth(lock.port, lock.host);
+    if (!health.ok) {
+      return false;
+    }
+
+    return true;
+  }
+
+  async start(): Promise<{ pid: number; port: number; host: string }> {
+    // Check if already running
+    const lock = await this.readLockFile();
+    if (lock) {
+      if (isProcessRunning(lock.pid)) {
+        const health = await this.checkHealth(lock.port, lock.host);
+        if (health.ok) {
+          if (!lock.sessions.includes(this.sessionId)) {
+            lock.sessions.push(this.sessionId);
+            lock.refCount = lock.sessions.length;
+            await this.writeLockFile(lock);
+          }
+          return { pid: lock.pid, port: lock.port, host: lock.host };
+        }
+      }
+      // Dead process or unhealthy
+      await this.removeLockFile();
+    }
+
+    // Direct health check in case server was started externally
+    const directHealth = await this.checkHealth();
+    if (directHealth.ok) {
+      await this.recordLockFileForPid(0);
+      return { pid: 0, port: this.options.port, host: this.options.host };
+    }
+
+    // Must spawn server
+    await fsp.mkdir(this.options.cacheDir, { recursive: true });
+    const logFilePath = this.options.logPath;
+    this.logStream = fs.createWriteStream(logFilePath, { flags: "a" });
+
+    const args = [
+      "run",
+      this.options.serverScriptPath,
+      "--port",
+      this.options.port.toString(),
+      "--model-path",
+      this.options.modelPath,
+      "--truncation",
+      this.options.truncation,
+    ];
+
+    const child = spawn("uv", args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: false,
+    });
+
+    this.process = child;
+    this.isOwner = true;
+
+    if (child.stdout) {
+      child.stdout.pipe(this.logStream, { end: false });
+    }
+    if (child.stderr) {
+      child.stderr.pipe(this.logStream, { end: false });
+    }
+
+    let spawnError: Error | null = null;
+    child.on("error", (err: Error) => {
+      spawnError = err;
+    });
+
+    const pid = child.pid;
+    if (!pid) {
+      throw new Error("Failed to spawn Python server: no PID returned");
+    }
+
+    await this.recordLockFileForPid(pid);
+
+    // Wait for health check ready
+    const startTime = Date.now();
+    while (Date.now() - startTime < this.options.startupTimeoutMs) {
+      const currentSpawnError = spawnError as Error | null;
+      if (currentSpawnError) {
+        await this.cleanupFailedSpawn(pid);
+        throw new Error(`Failed to launch CLM server: ${currentSpawnError.message}`);
+      }
+      if (child.exitCode !== null) {
+        await this.cleanupFailedSpawn(pid);
+        throw new Error(`CLM server exited prematurely with exit code ${child.exitCode}. Check ${logFilePath}`);
+      }
+
+      const health = await this.checkHealth();
+      if (health.ok) {
+        return { pid, port: this.options.port, host: this.options.host };
+      }
+
+      await new Promise((r) => setTimeout(r, this.options.healthIntervalMs));
+    }
+
+    await this.cleanupFailedSpawn(pid);
+    throw new Error(`CLM server startup timed out after ${this.options.startupTimeoutMs}ms. Check ${logFilePath}`);
+  }
+
+  private async cleanupFailedSpawn(pid: number): Promise<void> {
+    try {
+      if (this.process && this.process.exitCode === null) {
+        this.process.kill("SIGTERM");
+      } else if (pid > 0 && isProcessRunning(pid)) {
+        process.kill(pid, "SIGTERM");
+      }
+    } catch {
+      // Ignore
+    }
+    await this.removeLockFile();
+  }
+
+  async stop(): Promise<void> {
+    const lock = await this.readLockFile();
+    if (!lock) {
+      if (this.process && this.process.exitCode === null) {
+        this.process.kill("SIGTERM");
+      }
+      return;
+    }
+
+    // Remove this session from lockfile
+    lock.sessions = lock.sessions.filter((s) => s !== this.sessionId);
+    lock.refCount = lock.sessions.length;
+
+    if (lock.refCount > 0) {
+      // Other sessions are still using it
+      await this.writeLockFile(lock);
+      return;
+    }
+
+    // Last session: perform graceful shutdown
+    const targetPid = lock.pid;
+    if (targetPid > 0 && isProcessRunning(targetPid)) {
+      try {
+        process.kill(targetPid, "SIGTERM");
+        // Wait up to 5s for graceful exit
+        const stopWait = Date.now();
+        while (Date.now() - stopWait < 5000) {
+          if (!isProcessRunning(targetPid)) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        if (isProcessRunning(targetPid)) {
+          process.kill(targetPid, "SIGKILL");
+        }
+      } catch {
+        // Process might have exited
+      }
+    }
+
+    await this.removeLockFile();
+
+    if (this.logStream) {
+      this.logStream.end();
+      this.logStream = null;
+    }
+    this.process = null;
+    this.isOwner = false;
+  }
+}
