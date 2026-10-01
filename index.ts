@@ -105,7 +105,9 @@ export default function (pi: ExtensionAPI, extensionOptions?: ExtensionOptions) 
     }
   });
 
-  // Persistent status line above the editor (TUI mode only)
+  // Persistent status line above the editor (TUI mode only); hidden while
+  // the /clm panel is open so the status is not shown twice.
+  let panelOpen = false;
   pi.on("session_start", (_event, ctx) => {
     if (ctx.mode !== "tui") return;
     ctx.ui.setWidget("clm-status", (tui, _theme) => {
@@ -114,6 +116,7 @@ export default function (pi: ExtensionAPI, extensionOptions?: ExtensionOptions) 
       });
       return {
         render(width: number): string[] {
+          if (panelOpen) return [];
           return renderStatusLines(statusTracker.snapshot()).map((line) =>
             line.length <= width ? line : line.slice(0, Math.max(0, width - 1)) + "…"
           );
@@ -155,9 +158,16 @@ export default function (pi: ExtensionAPI, extensionOptions?: ExtensionOptions) 
       }
 
       await refreshStatus();
-      await ctx.ui.custom<null>((tui, theme, _keybindings, done) =>
-        createClmStatusPanel(statusTracker, tui, theme, actions, done)
-      );
+      await ctx.ui.custom<null>((tui, theme, _keybindings, done) => {
+        panelOpen = true;
+        tui.requestRender();
+        return createClmStatusPanel(statusTracker, tui, theme, actions, (result) => {
+          panelOpen = false;
+          tui.requestRender();
+          done(result);
+        });
+      });
+      panelOpen = false;
     },
   });
 

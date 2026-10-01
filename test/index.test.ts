@@ -4,9 +4,19 @@ import http from "node:http";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import registerPlugin, { DEFAULT_PORT, ServerManager, MANIFEST_FILENAME, ClmStatusTracker } from "../index.ts";
+import registerPlugin, { ServerManager, MANIFEST_FILENAME, ClmStatusTracker } from "../index.ts";
+import { freePort } from "./helpers.ts";
 
 const MOCK_COMMIT_SHA = "e".repeat(40);
+
+  /** Mock ExtensionAPI capturing session handlers and the /clm command. */
+  const makeRecordingPi = (sessionHandlers: Record<string, any>) => ({
+    registerProvider: () => {},
+    on: (event: string, handler: any) => {
+      sessionHandlers[event] = handler;
+    },
+    registerCommand: () => {},
+  });
 
 test("Extension index end-to-end classify test suite", async (t) => {
   const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-e2e-test-"));
@@ -19,11 +29,16 @@ test("Extension index end-to-end classify test suite", async (t) => {
   process.env.PI_CLM_STATE_DIR = tempDir;
   process.env.HF_HUB_CACHE = hubCacheDir;
   process.env.PI_CLM_SERVER_BIN = "";
+  // A real CLM server may be running on the default port (e.g. the user ran
+  // `make serve`); route all ServerManager defaults to a free port instead.
+  const defaultPort = await freePort();
+  process.env.PI_CLM_PORT = String(defaultPort);
 
   t.after(async () => {
     delete process.env.PI_CLM_STATE_DIR;
     delete process.env.HF_HUB_CACHE;
     delete process.env.PI_CLM_SERVER_BIN;
+    delete process.env.PI_CLM_PORT;
     await fsp.rm(tempDir, { recursive: true, force: true });
   });
 
@@ -80,7 +95,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
     assert.equal(registeredConfig.models[0].id, "clm-latest");
     assert.ok(registeredConfig.classifiers["typesafe-system-one"]);
 
-    // Setup mock server answering on DEFAULT_PORT
+    // Setup mock server answering on the (free) default port
     let healthHits = 0;
     let classifyHits = 0;
 
@@ -121,7 +136,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
       }
     });
 
-    await new Promise<void>((resolve) => mockServer.listen(DEFAULT_PORT, "127.0.0.1", resolve));
+    await new Promise<void>((resolve) => mockServer.listen(defaultPort, "127.0.0.1", resolve));
 
     try {
       const classifier = registeredConfig.classifiers["typesafe-system-one"].classify;
@@ -444,14 +459,31 @@ test("Extension index end-to-end classify test suite", async (t) => {
 
   await t.test("/clm command adapts to ctx.mode and drives the TUI panel", async () => {
     let commandConfig: any = null;
-    const mockPi: any = {
-      registerProvider: () => {},
-      on: () => {},
-      registerCommand: (_id: string, config: any) => {
-        commandConfig = config;
-      },
+    const sessionHandlers: Record<string, any> = {};
+    const mockPi: any = makeRecordingPi(sessionHandlers);
+    mockPi.registerCommand = (_id: string, config: any) => {
+      commandConfig = config;
     };
     registerPlugin(mockPi);
+
+    // Capture the persistent widget from the SAME plugin instance so we can
+    // assert it hides while the panel is open (no duplicated status).
+    assert.ok(sessionHandlers["session_start"]);
+    let widgetFactory: any = null;
+    await sessionHandlers["session_start"]({}, {
+      mode: "tui",
+      hasUI: true,
+      ui: {
+        setWidget: (_key: string, factory: any) => {
+          widgetFactory = factory;
+        },
+        notify: () => {},
+      },
+    });
+    assert.ok(widgetFactory);
+    const widget = widgetFactory({ requestRender: () => {} }, { fg: (_t: string, s: string) => s });
+    assert.ok(widget.render(80).some((l: string) => l.includes("CLM")));
+
     assert.ok(commandConfig);
     assert.ok(commandConfig.description.length > 0);
 
@@ -502,20 +534,20 @@ test("Extension index end-to-end classify test suite", async (t) => {
     const lines: string[] = panel.render(80);
     assert.ok(lines.every((l: string) => l.length <= 80));
     assert.ok(lines.some((l: string) => l.includes("CLM")));
+
+    // While the panel is open, the persistent widget hides (no duplicate status)
+    assert.deepEqual(widget.render(80), []);
+
     panel.handleInput("q");
     assert.deepEqual(doneResults, [null]);
+    // Once closed, the widget shows the status again
+    assert.ok(widget.render(80).some((l: string) => l.includes("CLM")));
     panel.dispose?.();
   });
 
   await t.test("session_start registers persistent status widget only in TUI mode", async () => {
     const sessionHandlers: Record<string, any> = {};
-    const mockPi: any = {
-      registerProvider: () => {},
-      on: (event: string, handler: any) => {
-        sessionHandlers[event] = handler;
-      },
-      registerCommand: () => {},
-    };
+    const mockPi: any = makeRecordingPi(sessionHandlers);
     registerPlugin(mockPi);
     assert.ok(sessionHandlers["session_start"]);
 

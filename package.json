@@ -23,6 +23,8 @@
     "typescript": "^5.9.3"
   },
   "scripts": {
+    "build": "bash scripts/build.sh",
+    "build:native": "bash scripts/build.sh --skip-tests",
     "test": "node --strip-types --test test/**/*.test.ts",
     "typecheck": "tsc --noEmit",
     "check:dup": "jscpd .",

@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import net from "node:net";
 import path from "node:path";
 import http from "node:http";
 import { spawn, type ChildProcess } from "node:child_process";
+import { freePort } from "./helpers.ts";
 
 /**
  * End-to-end test for the packaged native `bin/clm-server` (mlx-swift).
@@ -16,18 +16,6 @@ import { spawn, type ChildProcess } from "node:child_process";
  */
 const BIN = path.resolve(process.cwd(), "bin", "clm-server");
 const MODEL = process.env.PI_CLM_NATIVE_MODEL;
-
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.unref();
-    srv.on("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const port = (srv.address() as net.AddressInfo).port;
-      srv.close(() => resolve(port));
-    });
-  });
-}
 
 function request(port: number, method: string, p: string, body?: string): Promise<{ status: number; json: any }> {
   return new Promise((resolve, reject) => {

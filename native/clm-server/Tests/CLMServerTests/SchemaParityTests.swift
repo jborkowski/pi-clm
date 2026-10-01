@@ -60,6 +60,18 @@ struct SchemaParityTests {
         }
     }
 
+    /// Same shape as the generator's QUESTIONS["choice"].
+    static let choiceQuestion = JSONValue.object(OrderedObject([
+        ("type", .string("choice")),
+        ("instructions", .string("Pick")),
+        ("criteria", .object(OrderedObject([
+            ("a", .string("Option A")),
+            ("b", .string("")),
+            ("c", .int(3)),
+            ("d", .null),
+        ]))),
+    ]))
+
     @Test func buildPairsMatchesPython() throws {
         guard case .object(let pairs)? = fixtures["build_pairs"] else { Issue.record("fixtures missing"); return }
         let questions = OrderedObject([
@@ -67,16 +79,7 @@ struct SchemaParityTests {
                 ("type", .string("noul")),
                 ("instructions", .string("Is this urgent?")),
             ]))),
-            ("choice", JSONValue.object(OrderedObject([
-                ("type", .string("choice")),
-                ("instructions", .string("Pick")),
-                ("criteria", .object(OrderedObject([
-                    ("a", .string("Option A")),
-                    ("b", .string("")),
-                    ("c", .int(3)),
-                    ("d", .null),
-                ]))),
-            ]))),
+            ("choice", Self.choiceQuestion),
             ("score", JSONValue.object(OrderedObject([
                 ("type", .string("score")),
                 ("criteria", .array([.int(1), .int(2), .int(3)])),
@@ -115,18 +118,8 @@ struct SchemaParityTests {
 
         // answer assembly: serialize ours and compare to python's JSON text
         guard case .object(let choiceAns)? = fixtures["answer_choice"] else { Issue.record("fixtures missing"); return }
-        let choiceQ = JSONValue.object(OrderedObject([
-            ("type", .string("choice")),
-            ("instructions", .string("Pick")),
-            ("criteria", .object(OrderedObject([
-                ("a", .string("Option A")),
-                ("b", .string("")),
-                ("c", .int(3)),
-                ("d", .null),
-            ]))),
-        ]))
         let probs = Schema.softmax([1.0, 2.0, 0.5])
-        let got = Schema.answerFromProbs(q: choiceQ, keys: ["a", "b", "c"], probs: probs)
+        let got = Schema.answerFromProbs(q: Self.choiceQuestion, keys: ["a", "b", "c"], probs: probs)
         let gotText = try JSONSerializer.serialize(got)
         let expectedText = try JSONSerializer.serialize(JSONValue.object(choiceAns))
         #expect(gotText == expectedText)

@@ -123,10 +123,15 @@ public enum JSONParser {
             case UInt8(ascii: "t"): try expect("true"); return .bool(true)
             case UInt8(ascii: "f"): try expect("false"); return .bool(false)
             case UInt8(ascii: "n"): try expect("null"); return .null
-            case UInt8(ascii: "N"), UInt8(ascii: "I"), UInt8(ascii: "-")
-                where isNonFiniteLiteral():
-                throw JSONError("non-finite JSON number")
+            case UInt8(ascii: "N"), UInt8(ascii: "I"):
+                if isNonFiniteLiteral() {
+                    throw JSONError("non-finite JSON number")
+                }
+                throw pyMessage("Expecting value")
             case UInt8(ascii: "-"), UInt8(ascii: "0")...UInt8(ascii: "9"):
+                if bytes[pos] == UInt8(ascii: "-"), isNonFiniteLiteral() {
+                    throw JSONError("non-finite JSON number")
+                }
                 return try parseNumber()
             default:
                 throw pyMessage("Expecting value")

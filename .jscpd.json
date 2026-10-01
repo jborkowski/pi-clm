@@ -13,11 +13,14 @@
     "**/.pi/**",
     "**/dist/**",
     "**/coverage/**",
+    "skills-lock.json",
     "package-lock.json",
-    "skills-lock.json"
+    "native/clm-server/.build/**",
+    "bin/**"
   ],
   "format": [
     "javascript",
-    "typescript"
+    "typescript",
+    "swift"
   ]
 }

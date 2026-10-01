@@ -11,7 +11,7 @@ struct QuantizedLinear {
     let biases: MLXArray   // [out, in/64]
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        quantizedMatmul(x, weight, scales: scales, biases: biases, transpose: true, groupSize: 64, bits: 8)
+        quantizedMM(x, weight, scales: scales, biases: biases, transpose: true, groupSize: 64, bits: 8)
     }
 }
 
