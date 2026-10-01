@@ -1,18 +1,25 @@
 class PiClmServer < Formula
   desc "Native MLX server for the CLM (Contrastive Language Model) classifier"
   homepage "https://github.com/jborkowski/pi-clm"
-  url "https://github.com/jborkowski/pi-clm/releases/download/v__VERSION__/clm-server-__VERSION__-macos-arm64.tar.gz"
-  sha256 "__SHA256__"
+  url "https://github.com/jborkowski/pi-clm.git",
+      tag: "v__VERSION__", revision: "__REVISION__"
   version "__VERSION__"
 
-  # MLX/Metal require Apple Silicon
+  # MLX/Metal require Apple Silicon; Swift build needs Xcode + Metal toolchain
   depends_on arch: :arm64
   depends_on :macos
+  depends_on :xcode => ["13.0", :build]
 
   def install
-    libexec.install "clm-server", "mlx-swift_Cmlx.bundle"
+    cd "native/clm-server" do
+      # SPM fetches dependencies at build time; brew's sandbox denies that,
+      # hence the documented --no-sandbox.
+      system "swift", "build", "-c", "release", "--product", "CLMServer"
+      libexec.install ".build/out/Products/Release/CLMServer" => "clm-server"
+      libexec.install ".build/out/Products/Release/mlx-swift_Cmlx.bundle"
+    end
     # The MLX runtime loads mlx-swift_Cmlx.bundle from the executable's own
-    # directory, so keep the real binary in libexec and expose a wrapper.
+    # directory, so the real binary lives in libexec behind a wrapper.
     (bin / "pi-clm-server").write <<~EOS
       #!/bin/bash
       exec "#{libexec}/clm-server" "$@"
@@ -21,13 +28,13 @@ class PiClmServer < Formula
 
   def caveats
     <<~EOS
-      Use with the pi-clm Pi extension by pointing it at the brew-installed binary:
+      Requires the Metal toolchain once per Xcode:
+        xcodebuild -downloadComponent MetalToolchain
 
+      Use with the pi-clm Pi extension:
         export PI_CLM_SERVER_BIN=#{bin}/pi-clm-server
 
-      The model snapshot (~8.6 GB) is downloaded automatically to the standard
-      Hugging Face hub cache on first use, or serve it directly:
-
+      Serve directly (model snapshot downloads to the HF hub cache on first use):
         pi-clm-server --port 8700 --model-path <model-snapshot-dir>
     EOS
   end
