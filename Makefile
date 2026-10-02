@@ -74,10 +74,16 @@ clean: ## Remove Swift build artifacts and dist output
 	rm -rf dist
 
 # --- Homebrew local-tap workflow (per add-homebrew-formula skill) ---
-BREW    ?= brew
-TAP     := jborkowski/pi-clm
-FORMULA := $(TAP)/pi-clm-server
+# `make pack` snapshots the current working tree (committed *and* uncommitted)
+# into the local tap, and `make install` rebuilds from that snapshot — so every
+# install picks up the latest repo changes. The version comes from `git describe`
+# so `brew info` reports exactly which revision was packed.
+BREW         ?= brew
+TAP          := jborkowski/pi-clm
+FORMULA      := $(TAP)/pi-clm-server
+BREW_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')
 export HOMEBREW_NO_AUTO_UPDATE ?= 1
+export HOMEBREW_NO_INSTALL_FROM_API ?= 1
 
 .PHONY: tap pack install uninstall
 
@@ -86,15 +92,24 @@ tap:
 		$(BREW) tap-new "$(TAP)" --branch main; \
 	fi
 
-pack: tap dist
+pack: tap
+	@test -n "$(BREW_VERSION)" || { echo "error: cannot derive version (git describe failed)"; exit 1; }
 	@TAPDIR="$$($(BREW) --repo $(TAP))"; \
 	mkdir -p "$$TAPDIR/Formula"; \
-	rm -rf "$$TAPDIR/build-src" "$$TAPDIR/pi-clm-server-src.tar.gz"; \
-	rsync -a --exclude '.git/' --exclude 'node_modules/' --exclude 'dist/' --exclude '.DS_Store' \
+	rm -rf "$$TAPDIR/build-src" "$$TAPDIR"/pi-clm-server-*-src.tar.gz; \
+	rsync -a \
+		--exclude '.git' \
+		--exclude '.build/' \
+		--exclude 'bin/' \
+		--exclude 'node_modules/' \
+		--exclude 'dist/' \
+		--exclude '.DS_Store' \
 		./ "$$TAPDIR/build-src/"; \
-	tar -C "$$TAPDIR" -czf "$$TAPDIR/pi-clm-server-src.tar.gz" build-src; \
-	cp -f dist/pi-clm-server.rb "$$TAPDIR/Formula/pi-clm-server.rb"; \
-	echo "packed into local tap $$TAPDIR"
+	TARBALL="$$TAPDIR/pi-clm-server-$(BREW_VERSION)-src.tar.gz"; \
+	tar -C "$$TAPDIR" -czf "$$TARBALL" build-src; \
+	cp -f Formula/pi-clm-server.rb "$$TAPDIR/Formula/pi-clm-server.rb"; \
+	echo "packed $$TARBALL (version $(BREW_VERSION))"; \
+	echo "sha256: $$(shasum -a 256 "$$TARBALL" | cut -d' ' -f1)"
 
 install: pack
 	@if $(BREW) list --formula "$(FORMULA)" >/dev/null 2>&1; then \
@@ -104,4 +119,5 @@ install: pack
 	fi
 
 uninstall:
-	$(BREW) uninstall "$(FORMULA)" || true
+	-$(BREW) uninstall "$(FORMULA)"
+	-$(BREW) untap "$(TAP)"

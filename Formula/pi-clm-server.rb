@@ -1,14 +1,34 @@
 class PiClmServer < Formula
   desc "Native MLX server for the CLM (Contrastive Language Model) classifier"
   homepage "https://github.com/jborkowski/pi-clm"
-  url "https://github.com/jborkowski/pi-clm", tag: "v0.1.0"
-  version "0.1.0"
+
+  # In-repo local tap: `make pack` snapshots the *current working tree* into this
+  # tap as pi-clm-server-<version>-src.tar.gz, with <version> from `git describe`.
+  # A local install therefore always builds the latest repo state (including
+  # uncommitted edits). Without a packed tarball we build the repo's main branch,
+  # which likewise tracks the latest changes.
+  tap_path = begin
+    Tap.fetch("jborkowski/pi-clm").path
+  rescue LoadError, StandardError
+    nil
+  end
+
+  local_tarball = tap_path&.glob("pi-clm-server-*-src.tar.gz")&.max_by(&:mtime)
+
+  if local_tarball&.exist?
+    url "file://#{local_tarball}"
+    sha256 local_tarball.sha256
+    version local_tarball.basename.to_s[/pi-clm-server-(.+)-src\.tar\.gz/, 1]
+  else
+    url "https://github.com/jborkowski/pi-clm.git", branch: "main"
+    version "main"
+  end
 
   # MLX/Metal require Apple Silicon; Swift build needs Xcode + Metal toolchain
+  depends_on "git" => :build
+  depends_on xcode: ["13.0", :build]
   depends_on arch: :arm64
   depends_on :macos
-  depends_on xcode: ["13.0", :build]
-  depends_on "git" => :build
 
   # ---------------------------------------------------------------------------
   # Vendored SPM dependencies (mirrors native/clm-server/Package.resolved).
@@ -139,36 +159,36 @@ class PiClmServer < Formula
   # `.package(url: ...)` declaration can be rewritten to a path dependency.
   def spm_dep_urls
     {
-      "https://github.com/ml-explore/mlx-swift"                        => "mlx-swift",
-      "https://github.com/huggingface/swift-transformers"              => "swift-transformers",
-      "https://github.com/hummingbird-project/hummingbird"             => "hummingbird",
-      "https://github.com/swift-server/async-http-client"              => "async-http-client",
-      "https://github.com/mattt/EventSource"                           => "eventsource",
-      "https://github.com/apple/swift-algorithms"                      => "swift-algorithms",
-      "https://github.com/apple/swift-asn1"                            => "swift-asn1",
-      "https://github.com/apple/swift-async-algorithms"                => "swift-async-algorithms",
-      "https://github.com/apple/swift-atomics"                         => "swift-atomics",
-      "https://github.com/apple/swift-certificates"                    => "swift-certificates",
-      "https://github.com/apple/swift-collections"                     => "swift-collections",
-      "https://github.com/apple/swift-configuration"                   => "swift-configuration",
-      "https://github.com/apple/swift-crypto"                          => "swift-crypto",
-      "https://github.com/apple/swift-distributed-tracing"             => "swift-distributed-tracing",
-      "https://github.com/apple/swift-http-structured-headers"         => "swift-http-structured-headers",
-      "https://github.com/apple/swift-http-types"                      => "swift-http-types",
-      "https://github.com/huggingface/swift-huggingface"               => "swift-huggingface",
-      "https://github.com/huggingface/swift-jinja"                     => "swift-jinja",
-      "https://github.com/apple/swift-log"                             => "swift-log",
-      "https://github.com/apple/swift-metrics"                         => "swift-metrics",
-      "https://github.com/apple/swift-nio"                             => "swift-nio",
-      "https://github.com/apple/swift-nio-extras"                      => "swift-nio-extras",
-      "https://github.com/apple/swift-nio-http2"                       => "swift-nio-http2",
-      "https://github.com/apple/swift-nio-ssl"                         => "swift-nio-ssl",
-      "https://github.com/apple/swift-nio-transport-services"          => "swift-nio-transport-services",
-      "https://github.com/apple/swift-numerics"                        => "swift-numerics",
-      "https://github.com/apple/swift-service-context"                 => "swift-service-context",
-      "https://github.com/swift-server/swift-service-lifecycle"        => "swift-service-lifecycle",
-      "https://github.com/apple/swift-system"                          => "swift-system",
-      "https://github.com/ibireme/yyjson"                              => "yyjson",
+      "https://github.com/ml-explore/mlx-swift"                 => "mlx-swift",
+      "https://github.com/huggingface/swift-transformers"       => "swift-transformers",
+      "https://github.com/hummingbird-project/hummingbird"      => "hummingbird",
+      "https://github.com/swift-server/async-http-client"       => "async-http-client",
+      "https://github.com/mattt/EventSource"                    => "eventsource",
+      "https://github.com/apple/swift-algorithms"               => "swift-algorithms",
+      "https://github.com/apple/swift-asn1"                     => "swift-asn1",
+      "https://github.com/apple/swift-async-algorithms"         => "swift-async-algorithms",
+      "https://github.com/apple/swift-atomics"                  => "swift-atomics",
+      "https://github.com/apple/swift-certificates"             => "swift-certificates",
+      "https://github.com/apple/swift-collections"              => "swift-collections",
+      "https://github.com/apple/swift-configuration"            => "swift-configuration",
+      "https://github.com/apple/swift-crypto"                   => "swift-crypto",
+      "https://github.com/apple/swift-distributed-tracing"      => "swift-distributed-tracing",
+      "https://github.com/apple/swift-http-structured-headers"  => "swift-http-structured-headers",
+      "https://github.com/apple/swift-http-types"               => "swift-http-types",
+      "https://github.com/huggingface/swift-huggingface"        => "swift-huggingface",
+      "https://github.com/huggingface/swift-jinja"              => "swift-jinja",
+      "https://github.com/apple/swift-log"                      => "swift-log",
+      "https://github.com/apple/swift-metrics"                  => "swift-metrics",
+      "https://github.com/apple/swift-nio"                      => "swift-nio",
+      "https://github.com/apple/swift-nio-extras"               => "swift-nio-extras",
+      "https://github.com/apple/swift-nio-http2"                => "swift-nio-http2",
+      "https://github.com/apple/swift-nio-ssl"                  => "swift-nio-ssl",
+      "https://github.com/apple/swift-nio-transport-services"   => "swift-nio-transport-services",
+      "https://github.com/apple/swift-numerics"                 => "swift-numerics",
+      "https://github.com/apple/swift-service-context"          => "swift-service-context",
+      "https://github.com/swift-server/swift-service-lifecycle" => "swift-service-lifecycle",
+      "https://github.com/apple/swift-system"                   => "swift-system",
+      "https://github.com/ibireme/yyjson"                       => "yyjson",
     }
   end
 
@@ -184,27 +204,31 @@ class PiClmServer < Formula
       # one level of nested parens (e.g. .upToNextMajor(from: "1.0.0")).
       content.gsub!(
         /\.package\(\s*url:\s*"#{escaped}(?:\.git)?"(?:\s*,\s*(?:\([^()]*\)|[^()])*)?\)/,
-        ".package(path: \"#{rel}/#{name}\")"
+        ".package(path: \"#{rel}/#{name}\")",
       )
     end
     File.write(manifest, content)
   end
 
   def install
+    # `make pack` wraps sources in build-src/; a plain git checkout does not.
+    root = (buildpath/"build-src").directory? ? buildpath/"build-src" : buildpath
+
     deps_root = buildpath/"spm-deps"
     deps_root.mkpath
     resources.each do |r|
       r.stage(deps_root/r.name)
     end
 
-    # Rewrite the root manifest and every vendored dependency's manifest.
+    # Rewrite the root manifest and every vendored dependency's manifest (the
+    # staged deps live in buildpath/spm-deps, outside `root`).
     manifests = Dir.glob(buildpath/"**/Package.swift")
                    .reject { |p| p.include?("/.build/") }
     manifests.each do |manifest|
       rewrite_manifest(manifest, deps_root)
     end
 
-    cd "native/clm-server" do
+    cd root/"native/clm-server" do
       # Fully offline: all dependencies are local path packages.
       # --disable-sandbox turns off SwiftPM's *internal* sandbox-exec, which
       # cannot nest inside Homebrew's build sandbox ("sandbox_apply:
