@@ -8,7 +8,7 @@ struct CLIError: Error, CustomStringConvertible {
 // MARK: - Argument parsing
 
 struct CLIArguments {
-    var command = "serve"  // "serve" | "parity"
+    var command = "serve"  // "serve" | "parity" | "capabilities"
     var port = 8700
     var modelPath: String?
     var truncation = "head"
@@ -38,6 +38,7 @@ struct CLIArguments {
             switch a {
             case "--port": parsed.port = Int(try nextValue(a)) ?? 8700
             case "--model-path": parsed.modelPath = try nextValue(a)
+            case "--capabilities": parsed.command = "capabilities"
             case "--truncation":
                 parsed.truncation = try nextValue(a)
                 guard parsed.truncation == "head" || parsed.truncation == "tail" else {
@@ -48,7 +49,7 @@ struct CLIArguments {
             }
             i += 1
         }
-        guard parsed.modelPath != nil else {
+        guard parsed.command == "capabilities" || parsed.modelPath != nil else {
             throw CLIError(description: "--model-path is required")
         }
         return parsed
@@ -63,6 +64,11 @@ do {
 } catch let e {
     FileHandle.standardError.write(Data("clm-server: \(e)\n".utf8))
     exit(2)
+}
+
+if args.command == "capabilities" {
+    print(#"{"quantization_bits":[4,5,8]}"#)
+    exit(0)
 }
 
 let modelDir = URL(fileURLWithPath: args.modelPath!, isDirectory: true)

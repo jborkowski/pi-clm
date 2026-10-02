@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import os from "node:os";
 import crypto from "node:crypto";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -9,6 +10,17 @@ import { getHFHubCachePath, getRepoFolderName } from "@huggingface/hub";
 export const DEFAULT_REPO = "mlx-community/CLM-v0.1-8B-MLX-8bit";
 export const DEFAULT_REVISION = "main";
 export const MANIFEST_FILENAME = ".pi-clm-manifest.json";
+
+/** Directory for pi-clm runtime state (lock file, server log, saved model/quantization config). */
+export function getDefaultStateDir(): string {
+  if (process.env.PI_CLM_STATE_DIR) {
+    return process.env.PI_CLM_STATE_DIR;
+  }
+  if (process.env.XDG_CACHE_HOME) {
+    return path.join(process.env.XDG_CACHE_HOME, "pi-clm");
+  }
+  return path.join(os.homedir(), ".cache", "pi-clm");
+}
 
 export interface ProgressReport {
   file: string;

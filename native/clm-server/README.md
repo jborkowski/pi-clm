@@ -11,7 +11,7 @@ See the [root README](../../README.md) for the product picture and [ADR 003](../
 
 | File | Role |
 |---|---|
-| `main.swift` | CLI: `serve` (`--port`, `--model-path`, `--truncation head\|tail`) and the `parity` subcommand |
+| `main.swift` | CLI: `serve` (`--port`, `--model-path`, `--truncation head\|tail`), `--capabilities` (prints the supported quantization bits as JSON), and the `parity` subcommand |
 | `JSONValue.swift` | Strict JSON parser/serializer with **ordered objects** and int-vs-double distinction, producing Python `json.loads`-style error messages (`Expecting value: line 1 column 1 (char 0)`) and rejecting `NaN`/`Infinity` |
 | `Schema.swift` | Faithful port of `clm_mlx/schema.py`: state/candidate text building, `noul`/`choice`/`score` answers, softmax, TypeSafe-style confidence |
 | `Qwen3Encoder.swift` | Frozen Qwen3-8B encoder: affine-quantized linears (U32-packed weights, BF16 scales) with checkpoint-driven bits/group size (8-bit-g64 default, 4-bit-g32 / 5-bit variants supported), QK-RMSNorm, RoPE, GQA attention, right-padded batches, last-token hidden state after the final RMSNorm (L2-normalised), head/tail truncation |

@@ -8,7 +8,7 @@ import MLXNN
 /// Bits/group size come from the checkpoint's `quantization` config (8-bit
 /// group-64 by default, but 4-bit-g32 / 5-bit variants load the same way).
 struct QuantizedLinear {
-    let weight: MLXArray   // [out, in/4] uint32
+    let weight: MLXArray   // [out, in*bits/32] uint32 (bits-driven)
     let scales: MLXArray
     let biases: MLXArray
     let groupSize: Int
@@ -133,15 +133,10 @@ final class Qwen3Encoder {
     struct Quantization: Equatable {
         var bits: Int
         var groupSize: Int
-
-        init(bits: Int, groupSize: Int) {
-            self.bits = bits
-            self.groupSize = groupSize
-        }
     }
 
     let config: Config
-    let embedWeight: MLXArray  // [vocab, hidden/4] uint32
+    let embedWeight: MLXArray  // [vocab, hidden*bits/32] uint32 (bits-driven)
     let embedScales: MLXArray
     let embedBiases: MLXArray
     let embedGroupSize: Int
@@ -212,22 +207,27 @@ final class Qwen3Encoder {
 
     /// Parse the `quantization` object from config.json (mlx-lm format):
     /// top-level `bits` / `group_size` plus optional per-module override
-    /// entries (e.g. `"model.embed_tokens": {"bits": 6, "group_size": 32}`).
-    /// Unknown shapes return nil so callers keep the 8-bit-g64 default.
+    /// entries (e.g. `"model.embed_tokens": {"bits": 6, "group_size": 32}`);
+    /// a partial override inherits the missing field from the top-level
+    /// default, as mlx-lm's loader does. Unknown shapes return nil so callers
+    /// keep the 8-bit-g64 default.
     static func parseQuantization(_ value: JSONValue?) -> (default: Quantization, overrides: [String: (Int, Int)])? {
         guard case .object(let q)? = value else { return nil }
         guard case .int(let bits)? = q["bits"],
               case .int(let groupSize)? = q["group_size"]
         else { return nil }
+        let def = Quantization(bits: Int(bits), groupSize: Int(groupSize))
         var overrides: [String: (Int, Int)] = [:]
         for (k, v) in q.pairs {
-            guard case .object(let o) = v,
-                  case .int(let b)? = o["bits"],
-                  case .int(let g)? = o["group_size"]
-            else { continue }
-            overrides[k] = (Int(b), Int(g))
+            guard case .object(let o) = v else { continue }
+            var b: Int?
+            if case .int(let x)? = o["bits"] { b = Int(x) }
+            var g: Int?
+            if case .int(let x)? = o["group_size"] { g = Int(x) }
+            if b == nil && g == nil { continue }
+            overrides[k] = (b ?? def.bits, g ?? def.groupSize)
         }
-        return (Quantization(bits: Int(bits), groupSize: Int(groupSize)), overrides)
+        return (def, overrides)
     }
 
     static func loadShards(encoderDir: URL) throws -> [String: MLXArray] {

@@ -41,6 +41,21 @@ final class QuantizationConfigTests: XCTestCase {
         XCTAssertNil(try parse(#"{"group_size": 32}"#))  // no bits
     }
 
+    func testPartialOverridesInheritCheckpointDefaults() throws {
+        let q = try parse(#"{"bits": 4, "group_size": 32, "model.layers.0.self_attn.v_proj": {"bits": 6}, "model.embed_tokens": {"group_size": 64}}"#)
+        XCTAssertEqual(q?.default, Qwen3Encoder.Quantization(bits: 4, groupSize: 32))
+        XCTAssertEqual(q?.overrides["model.layers.0.self_attn.v_proj"]?.0, 6)
+        XCTAssertEqual(q?.overrides["model.layers.0.self_attn.v_proj"]?.1, 32)
+        XCTAssertEqual(q?.overrides["model.embed_tokens"]?.0, 4)
+        XCTAssertEqual(q?.overrides["model.embed_tokens"]?.1, 64)
+    }
+
+    func testOverridesWithoutQuantizationFieldsIgnored() throws {
+        let q = try parse(#"{"bits": 4, "group_size": 32, "model.embed_tokens": {}, "other": {"bits": "eight"}}"#)
+        XCTAssertEqual(q?.default, Qwen3Encoder.Quantization(bits: 4, groupSize: 32))
+        XCTAssertEqual(q?.overrides.count, 0)
+    }
+
     func testNonObjectEntriesIgnored() throws {
         let q = try parse(#"{"bits": 4, "group_size": 32, "not-a-module": 3}"#)
         XCTAssertEqual(q?.default, Qwen3Encoder.Quantization(bits: 4, groupSize: 32))

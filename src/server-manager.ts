@@ -1,16 +1,20 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execFile, type ChildProcess } from "node:child_process";
+import { promisify } from "node:util";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import os from "node:os";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import {
   DEFAULT_REPO,
+  getDefaultStateDir,
   getHubCacheDir,
   getModelPath as resolveHubModelPath,
   type ModelManagerOptions,
 } from "./model-manager.ts";
+import { repoQuantizationBits } from "./model-config.ts";
+
+const execFileAsync = promisify(execFile);
 
 export const DEFAULT_PORT = 8700;
 export const DEFAULT_HOST = "127.0.0.1";
@@ -64,17 +68,6 @@ export function isProcessRunning(pid: number): boolean {
   } catch (err: any) {
     return err.code === "EPERM";
   }
-}
-
-/** Directory for pi-clm runtime state (lock file, server log, saved model/quantization config). */
-export function getDefaultStateDir(): string {
-  if (process.env.PI_CLM_STATE_DIR) {
-    return process.env.PI_CLM_STATE_DIR;
-  }
-  if (process.env.XDG_CACHE_HOME) {
-    return path.join(process.env.XDG_CACHE_HOME, "pi-clm");
-  }
-  return path.join(os.homedir(), ".cache", "pi-clm");
 }
 
 export function getDefaultServerScriptPath(): string {
@@ -132,34 +125,32 @@ export function getNativeServerBinPath(): string | null {
 }
 
 /**
- * Whether the pre-compiled native server can serve this model repo: it loads
- * the published CLM-v0.1-8B checkpoints — 4-bit-g32, 5-bit and 8-bit-g64
- * affine quantization, with bits/group size read from each checkpoint's
- * config — so any other repo must run through the Python server.
+ * Quantization bit widths a pre-`--capabilities` native binary supports:
+ * every build shipped before quantization-config support (e.g. brew v0.1.0)
+ * loads 8-bit only.
  */
-const NATIVE_SUPPORTED_REPOS: ReadonlySet<string> = new Set([
-  "mlx-community/CLM-v0.1-8B-MLX-4bit",
-  "mlx-community/CLM-v0.1-8B-MLX-5bit",
-  DEFAULT_REPO,
-]);
-
-export function isNativeServerSupportedRepo(repo: string): boolean {
-  return NATIVE_SUPPORTED_REPOS.has(repo);
-}
+const LEGACY_NATIVE_QUANT_BITS: readonly number[] = [8];
 
 /**
- * The command used to launch the CLM server: the native binary when one is
- * available and can load the configured repo (zero dependencies, fast cold
- * start), otherwise `uv run server.py`.
+ * Quantization bit widths the native binary reports support for via
+ * `--capabilities`, or null when it cannot answer (pre-capability build,
+ * probe timeout, malformed output).
  */
-export function buildServerCommand(options: {
-  port: number;
-  modelPath: string;
-  truncation: string;
-  serverScriptPath: string;
-  repo: string;
-}): { command: string; args: string[]; native: boolean } {
-  const flagArgs = [
+async function getNativeQuantizationBits(binPath: string): Promise<number[] | null> {
+  try {
+    const { stdout } = await execFileAsync(binPath, ["--capabilities"], { timeout: 5_000 });
+    const parsed = JSON.parse(stdout) as { quantization_bits?: unknown };
+    if (Array.isArray(parsed.quantization_bits) && parsed.quantization_bits.every((b) => typeof b === "number")) {
+      return parsed.quantization_bits;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function serverFlagArgs(options: { port: number; modelPath: string; truncation: string }): string[] {
+  return [
     "--port",
     options.port.toString(),
     "--model-path",
@@ -167,11 +158,53 @@ export function buildServerCommand(options: {
     "--truncation",
     options.truncation,
   ];
+}
+
+/** The `uv run server.py` command. */
+function pythonServerCommand(options: {
+  port: number;
+  modelPath: string;
+  truncation: string;
+  serverScriptPath: string;
+}): { command: string; args: string[]; native: boolean } {
+  return {
+    command: "uv",
+    args: ["run", options.serverScriptPath, ...serverFlagArgs(options)],
+    native: false,
+  };
+}
+
+/**
+ * The native-server command when a binary is available and reports support
+ * for the repo's quantization bits, else null.
+ */
+async function nativeServerCommand(options: {
+  port: number;
+  modelPath: string;
+  truncation: string;
+  repo: string;
+}): Promise<{ command: string; args: string[]; native: boolean } | null> {
   const nativeBin = getNativeServerBinPath();
-  if (nativeBin && isNativeServerSupportedRepo(options.repo)) {
-    return { command: nativeBin, args: flagArgs, native: true };
-  }
-  return { command: "uv", args: ["run", options.serverScriptPath, ...flagArgs], native: false };
+  if (!nativeBin) return null;
+  const bits = repoQuantizationBits(options.repo);
+  if (bits === undefined) return null;
+  const supported = (await getNativeQuantizationBits(nativeBin)) ?? LEGACY_NATIVE_QUANT_BITS;
+  return supported.includes(bits) ? { command: nativeBin, args: serverFlagArgs(options), native: true } : null;
+}
+
+/**
+ * The command used to launch the CLM server: the native binary when one is
+ * available and reports support for the repo's quantization (zero
+ * dependencies, fast cold start), otherwise `uv run server.py`.
+ */
+export async function buildServerCommand(options: {
+  port: number;
+  modelPath: string;
+  truncation: string;
+  serverScriptPath: string;
+  repo: string;
+}): Promise<{ command: string; args: string[]; native: boolean }> {
+  return (await nativeServerCommand(options)) ?? pythonServerCommand(options);
 }
 
 export class ServerManager {
@@ -395,15 +428,29 @@ export class ServerManager {
     const logFilePath = this.options.logPath;
     this.logStream = fs.createWriteStream(logFilePath, { flags: "a" });
 
-    const { command, args } = buildServerCommand({
+    const commandOptions = {
       port: this.options.port,
       modelPath,
       truncation: this.options.truncation,
       serverScriptPath: this.options.serverScriptPath,
       repo: this.getModelRepo(),
-    });
+    };
 
-    const child = spawn(command, args, {
+    // Native first when the binary reports support for this repo's
+    // quantization; a failed native launch falls back to the Python server.
+    const native = await nativeServerCommand(commandOptions);
+    try {
+      return await this.launchServer(native ?? pythonServerCommand(commandOptions));
+    } catch (err) {
+      if (!native) throw err;
+      return await this.launchServer(pythonServerCommand(commandOptions));
+    }
+  }
+
+  /** Spawn a server command, record its lock entry, and wait until healthy. */
+  private async launchServer(cmd: { command: string; args: string[] }): Promise<{ pid: number; port: number; host: string }> {
+    const logFilePath = this.options.logPath;
+    const child = spawn(cmd.command, cmd.args, {
       stdio: ["ignore", "pipe", "pipe"],
       detached: false,
     });
@@ -411,10 +458,10 @@ export class ServerManager {
     this.process = child;
     this.isOwner = true;
 
-    if (child.stdout) {
+    if (child.stdout && this.logStream) {
       child.stdout.pipe(this.logStream, { end: false });
     }
-    if (child.stderr) {
+    if (child.stderr && this.logStream) {
       child.stderr.pipe(this.logStream, { end: false });
     }
 
@@ -425,7 +472,7 @@ export class ServerManager {
 
     const pid = child.pid;
     if (!pid) {
-      throw new Error("Failed to spawn Python server: no PID returned");
+      throw new Error("Failed to spawn CLM server: no PID returned");
     }
 
     await this.recordLockFileForPid(pid);
@@ -454,7 +501,7 @@ export class ServerManager {
     throw new Error(
       `CLM server startup timed out after ${this.options.startupTimeoutMs}ms. ` +
       `Check the log file at ${logFilePath}. ` +
-      `To diagnose issues manually, try running: ${command} ${args.join(" ")}`
+      `To diagnose issues manually, try running: ${cmd.command} ${cmd.args.join(" ")}`
     );
   }
 

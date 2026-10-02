@@ -1,7 +1,6 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { getDefaultStateDir } from "./server-manager.ts";
-import { DEFAULT_REPO } from "./model-manager.ts";
+import { DEFAULT_REPO, getDefaultStateDir } from "./model-manager.ts";
 
 export const CONFIG_FILENAME = "config.json";
 
@@ -15,6 +14,8 @@ export interface QuantizationVariant {
   id: string;
   /** Full HF repo id for this variant. */
   repo: string;
+  /** Quantization bit width of this variant's checkpoint. */
+  bits: number;
   /** Human-readable label for menus. */
   label: string;
   /** Approximate download size of the weights. */
@@ -44,6 +45,7 @@ export const MODELS: ModelChoice[] = [
       {
         id: "4bit",
         repo: "mlx-community/CLM-v0.1-8B-MLX-4bit",
+        bits: 4,
         label: "4-bit",
         weightsSize: "~4.7 GB",
         peakMemory: "~5.5 GB peak (16 GB Macs recommended)",
@@ -53,6 +55,7 @@ export const MODELS: ModelChoice[] = [
       {
         id: "5bit",
         repo: "mlx-community/CLM-v0.1-8B-MLX-5bit",
+        bits: 5,
         label: "5-bit",
         weightsSize: "~6 GB",
         peakMemory: "~7 GB peak (estimated)",
@@ -60,7 +63,8 @@ export const MODELS: ModelChoice[] = [
       },
       {
         id: "8bit",
-        repo: "mlx-community/CLM-v0.1-8B-MLX-8bit",
+        repo: DEFAULT_REPO,
+        bits: 8,
         label: "8-bit",
         weightsSize: "~8 GB",
         peakMemory: "~9 GB peak",
@@ -97,6 +101,19 @@ export function configToRepo(config: ClmConfig | null | undefined): string | und
   if (!model) return undefined;
   const variant = findVariant(model, config.quantizationId);
   return variant?.repo;
+}
+
+/**
+ * Quantization bit width of a published variant's checkpoint, or undefined
+ * when the repo is not a variant of any model in MODELS.
+ */
+export function repoQuantizationBits(repo: string): number | undefined {
+  for (const model of MODELS) {
+    for (const variant of model.variants) {
+      if (variant.repo === repo) return variant.bits;
+    }
+  }
+  return undefined;
 }
 
 export function getConfigPath(stateDir?: string): string {

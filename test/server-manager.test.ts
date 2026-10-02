@@ -12,6 +12,7 @@ import {
   buildServerCommand,
   getPackageRoot,
 } from "../src/server-manager.ts";
+import { freePort } from "./helpers.ts";
 
 function createMockHealthServer(port: number, modelName = "clm-latest"): Promise<{ server: http.Server; close: () => Promise<void> }> {
   const server = http.createServer((req, res) => {
@@ -181,7 +182,14 @@ test("native server binary detection and preference", async (t) => {
   const originalEnv = process.env.PI_CLM_SERVER_BIN;
 
   const fakeBin = path.join(tempDir, "fake-clm-server");
-  await fsp.writeFile(fakeBin, "#!/bin/sh\necho \"$@\" > \"$ARGS_OUT\"\nexec python3 \"$MOCK_SERVER\" \"$@\"\n", { mode: 0o755 });
+  await fsp.writeFile(
+    fakeBin,
+    "#!/bin/sh\n" +
+      "if [ \"$1\" = \"--capabilities\" ]; then echo '{\"quantization_bits\":[4,5,8]}'; exit 0; fi\n" +
+      "echo \"$@\" > \"$ARGS_OUT\"\n" +
+      "exec python3 \"$MOCK_SERVER\" \"$@\"\n",
+    { mode: 0o755 }
+  );
 
   t.after(async () => {
     if (originalEnv !== undefined) process.env.PI_CLM_SERVER_BIN = originalEnv;
@@ -239,7 +247,7 @@ test("native server binary detection and preference", async (t) => {
     });
   });
 
-  await t.test("buildServerCommand picks native for the CLM variants, uv for other repos", () => {
+  await t.test("buildServerCommand couples native serving to reported quantization support", async () => {
     const opts = {
       port: 8700,
       modelPath: "/m",
@@ -247,22 +255,44 @@ test("native server binary detection and preference", async (t) => {
       serverScriptPath: "/s.py",
       repo: "mlx-community/CLM-v0.1-8B-MLX-8bit",
     };
+    const writeBin = async (name: string, script: string) => {
+      const bin = path.join(tempDir, name);
+      await fsp.writeFile(bin, script, { mode: 0o755 });
+      return bin;
+    };
 
-    // the native binary loads the 4-bit, 5-bit and 8-bit checkpoints alike
+    // a binary reporting 4/5/8-bit support serves every published variant
     process.env.PI_CLM_SERVER_BIN = fakeBin;
     for (const repo of ["mlx-community/CLM-v0.1-8B-MLX-4bit", "mlx-community/CLM-v0.1-8B-MLX-5bit", opts.repo]) {
-      const cmd = buildServerCommand({ ...opts, repo });
+      const cmd = await buildServerCommand({ ...opts, repo });
       assert.equal(cmd.native, true);
       assert.equal(cmd.command, fakeBin);
       assert.deepEqual(cmd.args, ["--port", "8700", "--model-path", "/m", "--truncation", "head"]);
     }
 
-    // a repo the native server cannot load — and any repo when the native
+    // 8-bit-only binaries — an explicit 8-bit report or a pre-capability
+    // build that cannot answer at all — serve only the 8-bit repo natively;
+    // the 4-bit variant goes through uv
+    const eightBitOnly = await writeBin("eight-bit-only", "#!/bin/sh\necho '{\"quantization_bits\":[8]}'\n");
+    const preCapability = await writeBin("pre-capability", "#!/bin/sh\nexit 2\n");
+    for (const bin of [eightBitOnly, preCapability]) {
+      process.env.PI_CLM_SERVER_BIN = bin;
+      const eightBit = await buildServerCommand(opts);
+      assert.equal(eightBit.native, true);
+      assert.equal(eightBit.command, bin);
+      const fourBit = await buildServerCommand({ ...opts, repo: "mlx-community/CLM-v0.1-8B-MLX-4bit" });
+      assert.equal(fourBit.native, false);
+      assert.equal(fourBit.command, "uv");
+      assert.deepEqual(fourBit.args, ["run", "/s.py", "--port", "8700", "--model-path", "/m", "--truncation", "head"]);
+    }
+
+    // a repo that is not a published variant — and any repo when the native
     // server is disabled — goes through uv
-    const otherWithNative = buildServerCommand({ ...opts, repo: "test/other-repo" });
+    process.env.PI_CLM_SERVER_BIN = fakeBin;
+    const otherWithNative = await buildServerCommand({ ...opts, repo: "test/other-repo" });
     process.env.PI_CLM_SERVER_BIN = "";
-    const eightBitWithoutNative = buildServerCommand(opts);
-    for (const uv of [otherWithNative, eightBitWithoutNative]) {
+    const withoutNative = await buildServerCommand(opts);
+    for (const uv of [otherWithNative, withoutNative]) {
       assert.equal(uv.native, false);
       assert.equal(uv.command, "uv");
       assert.deepEqual(uv.args, ["run", "/s.py", "--port", "8700", "--model-path", "/m", "--truncation", "head"]);
@@ -328,4 +358,54 @@ test("native server binary detection and preference", async (t) => {
 
   await t.test("start() spawns the native binary for the 4-bit repo too", () =>
     assertNativeStart(59129, "mlx-community/CLM-v0.1-8B-MLX-4bit"));
+
+  await t.test("start() falls back to the Python server when the native binary fails", async () => {
+    const argsFile = path.join(tempDir, "failing-native-args.txt");
+    const failingBin = path.join(tempDir, "failing-clm-server");
+    await fsp.writeFile(
+      failingBin,
+      "#!/bin/sh\n" +
+        "if [ \"$1\" = \"--capabilities\" ]; then echo '{\"quantization_bits\":[4,5,8]}'; exit 0; fi\n" +
+        "echo \"$@\" >> \"$ARGS_OUT\"\n" +
+        "exit 3\n",
+      { mode: 0o755 }
+    );
+    const uvDir = path.join(tempDir, "fake-uv-dir");
+    await fsp.mkdir(uvDir, { recursive: true });
+    await fsp.writeFile(path.join(uvDir, "uv"), "#!/bin/sh\nshift\nexec python3 \"$@\"\n", { mode: 0o755 });
+
+    const port = await freePort();
+    const stateDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-fallback-state-"));
+    const originalPath = process.env.PATH;
+    const originalBin = process.env.PI_CLM_SERVER_BIN;
+    process.env.PI_CLM_SERVER_BIN = failingBin;
+    process.env.ARGS_OUT = argsFile;
+    process.env.PATH = `${uvDir}${path.delimiter}${originalPath}`;
+    const manager = new ServerManager({
+      port,
+      stateDir,
+      hubCacheDir: tempDir,
+      modelRepo: "mlx-community/CLM-v0.1-8B-MLX-4bit",
+      serverScriptPath: path.resolve(process.cwd(), "test/fixtures/mock-server.py"),
+      startupTimeoutMs: 30_000,
+    });
+    try {
+      await manager.start();
+
+      const lock = await manager.readLockFile();
+      assert.ok(lock);
+      assert.equal(lock.port, port);
+      // the capable native binary was tried first and died; the uv fallback serves
+      const nativeArgs = (await fsp.readFile(argsFile, "utf-8")).trim();
+      assert.ok(nativeArgs.includes("--model-path"), nativeArgs);
+
+      await manager.stop();
+    } finally {
+      process.env.PATH = originalPath;
+      if (originalBin === undefined) delete process.env.PI_CLM_SERVER_BIN;
+      else process.env.PI_CLM_SERVER_BIN = originalBin;
+      delete process.env.ARGS_OUT;
+      await fsp.rm(stateDir, { recursive: true, force: true });
+    }
+  });
 });
