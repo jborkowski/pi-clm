@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
-import type { ClassifierModel, ClassifierContext, ClassifierOptions, ClassifierResult } from "@earendil-works/pi-ai";
+import { Type } from "@earendil-works/pi-ai";
+import type { ClassifierModel, ClassifierContext, ClassifierOptions, ClassifierResult, JsonObject } from "@earendil-works/pi-ai";
 import {
   MODELS,
   formatVariantLine,
@@ -22,10 +23,12 @@ import {
   renderStatusLines,
   type PanelActions,
 } from "./src/status-panel.ts";
+import { createClm, DEFAULT_SCORE_CRITERIA, type ClmAnswer, type ClmBoolAnswer, type ClmScoreAnswer } from "./src/codemode.ts";
 export * from "./src/model-manager.ts";
 export * from "./src/model-config.ts";
 export * from "./src/server-manager.ts";
 export * from "./src/status-panel.ts";
+export * from "./src/codemode.ts";
 
 export interface ExtensionOptions {
   serverManager?: ServerManager;
@@ -287,18 +290,112 @@ export default async function (pi: ExtensionAPI, extensionOptions?: ExtensionOpt
     },
   });
 
+  const clmModel: ClassifierModel<"typesafe-system-one"> = {
+    type: "classifier",
+    id: "clm-latest",
+    name: "CLM MLX (local)",
+    api: "typesafe-system-one",
+    provider: "clm-local",
+    baseUrl: `http://${serverManager.getOptions().host}:${serverManager.getOptions().port}/v1`,
+    input: ["text"],
+    contextWindow: 2048,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  };
+
+  // Pi requires an API key even though the loopback server does not authenticate.
+  const CLM_LOCAL_API_KEY = "local";
+
+  const clm = createClm((context) => classifyWrapper(clmModel, context, { apiKey: CLM_LOCAL_API_KEY }));
+
+  // Code-mode surface (issue #9): codemode-only tools returning structured
+  // JSON via outputSchema/structuredContent, so sandbox scripts call
+  // `tools.clm_bool(...)` etc. and compose with Promise.all — no rendered-text
+  // parsing, no string dispatch.
+  const clmNamespace = {
+    name: "clm",
+    description: "Local CLM classifier: typed yes/no, choice, and score questions with probabilities",
+    instructions:
+      "Each tool returns a structured ClmAnswer: { answer, probabilities, confidence, question } " +
+      "(score adds `value`). `state` defaults to { message: question }; pass it to classify a " +
+      "specific text instead of the question itself.",
+  };
+  const clmStructured = (answer: JsonObject) => ({
+    content: [{ type: "text" as const, text: JSON.stringify(answer) }],
+    structuredContent: answer,
+    details: undefined,
+  });
+
+  pi.registerTool({
+    name: "clm_bool",
+    label: "CLM yes/no",
+    description: "Ask the local CLM classifier a yes/no question; returns a ClmAnswer over \"yes\" | \"no\".",
+    exposure: "codemode",
+    namespace: clmNamespace,
+    parameters: Type.Object({
+      question: Type.String({ description: "The yes/no question to ask" }),
+      state: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "State to classify; defaults to { message: question }" })),
+    }),
+    outputSchema: Type.Object({
+      answer: Type.Union([Type.Literal("yes"), Type.Literal("no")]),
+      probabilities: Type.Object({
+        yes: Type.Number(),
+        no: Type.Number(),
+      }),
+      confidence: Type.Number(),
+      question: Type.String(),
+    }),
+    async execute(_id, params) {
+      return clmStructured((await clm.bool(params.question, params.state as JsonObject | undefined)) as unknown as JsonObject);
+    },
+  });
+
+  pi.registerTool({
+    name: "clm_choice",
+    label: "CLM choice",
+    description: "Ask the local CLM classifier a single-choice question; returns a ClmAnswer typed over the criteria keys.",
+    exposure: "codemode",
+    namespace: clmNamespace,
+    parameters: Type.Object({
+      question: Type.String({ description: "The choice question to ask" }),
+      criteria: Type.Record(Type.String(), Type.String(), { description: "Map of criterion key to its description" }),
+      state: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "State to classify; defaults to { message: question }" })),
+    }),
+    outputSchema: Type.Object({
+      answer: Type.String(),
+      probabilities: Type.Record(Type.String(), Type.Number()),
+      confidence: Type.Number(),
+      question: Type.String(),
+    }),
+    async execute(_id, params) {
+      return clmStructured((await clm.choice(params.question, params.criteria as Record<string, string>, params.state as JsonObject | undefined)) as unknown as JsonObject);
+    },
+  });
+
+  pi.registerTool({
+    name: "clm_score",
+    label: "CLM score",
+    description: `Ask the local CLM classifier for a score; returns { answer, value, confidence, question }. Criteria default to ${DEFAULT_SCORE_CRITERIA.join(", ")}.`,
+    exposure: "codemode",
+    namespace: clmNamespace,
+    parameters: Type.Object({
+      question: Type.String({ description: "The scoring question to ask" }),
+      criteria: Type.Optional(Type.Array(Type.Union([Type.String(), Type.Number()]), { description: "Ordered criteria labels, lowest to highest" })),
+      state: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "State to classify; defaults to { message: question }" })),
+    }),
+    outputSchema: Type.Object({
+      answer: Type.String(),
+      value: Type.Number(),
+      confidence: Type.Number(),
+      question: Type.String(),
+    }),
+    async execute(_id, params) {
+      return clmStructured((await clm.score(params.question, params.criteria, params.state as JsonObject | undefined)) as unknown as JsonObject);
+    },
+  });
+
   pi.registerProvider("clm-local", {
-    apiKey: "local", // Pi requires a key; the loopback server does not authenticate.
-    models: [{
-      type: "classifier",
-      id: "clm-latest",
-      name: "CLM MLX (local)",
-      api: "typesafe-system-one",
-      baseUrl: `http://${serverManager.getOptions().host}:${serverManager.getOptions().port}/v1`,
-      input: ["text"],
-      contextWindow: 2048,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    }],
+    apiKey: CLM_LOCAL_API_KEY,
+    models: [clmModel],
     classifiers: { "typesafe-system-one": { classify: classifyWrapper } },
   });
 }

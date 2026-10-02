@@ -17,6 +17,14 @@ import { freePort } from "./helpers.ts";
 
 const MOCK_COMMIT_SHA = "e".repeat(40);
 
+/** Answer /health with the standard ok payload; returns false for any other URL. */
+const serveHealth = (req: http.IncomingMessage, res: http.ServerResponse): boolean => {
+  if (req.url !== "/health") return false;
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ status: "ok", model: "clm-latest" }));
+  return true;
+};
+
   /** Mock ExtensionAPI capturing session handlers and the /clm command. */
   const makeRecordingPi = (sessionHandlers: Record<string, any>) => ({
     registerProvider: () => {},
@@ -24,6 +32,7 @@ const MOCK_COMMIT_SHA = "e".repeat(40);
       sessionHandlers[event] = handler;
     },
     registerCommand: () => {},
+    registerTool: () => {},
   });
 
 test("Extension index end-to-end classify test suite", async (t) => {
@@ -59,6 +68,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
         if (event === "session_shutdown") shutdownHandlers.push(handler);
       },
       registerCommand: () => {},
+      registerTool: () => {},
     };
     return { pi, shutdownHandlers };
   };
@@ -186,11 +196,11 @@ test("Extension index end-to-end classify test suite", async (t) => {
     let classifyHits = 0;
 
     const mockServer = http.createServer((req, res) => {
-      if (req.url === "/health") {
+      if (serveHealth(req, res)) {
         healthHits++;
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ status: "ok", model: "clm-latest" }));
-      } else if (req.url === "/v1/systemone") {
+        return;
+      }
+      if (req.url === "/v1/systemone") {
         classifyHits++;
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -281,6 +291,111 @@ test("Extension index end-to-end classify test suite", async (t) => {
     }
   });
 
+  await t.test("codemode tools execute against the wire API and return structured ClmAnswers", async () => {
+    const port = await freePort();
+    const wireRequests: any[] = [];
+    const mockServer = http.createServer((req, res) => {
+      if (serveHealth(req, res)) return;
+      if (req.url === "/v1/systemone") {
+        let data = "";
+        req.on("data", (c) => (data += c));
+        req.on("end", () => {
+          const body = JSON.parse(data);
+          wireRequests.push(body);
+          const q = body.questions.q;
+          if (q.instructions.includes("boom")) {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "simulated classifier failure" }));
+            return;
+          }
+          // Mirror real server answer shapes: bool arrives as wire-level
+          // `noul`, choice carries the distribution, and score is a
+          // CONTINUOUS expected index (fractional for real distributions).
+          const answer =
+            q.type === "noul"
+              ? { type: "noul", noul: 0.8 }
+              : q.type === "choice"
+                ? { type: "choice", choice: "deny", probabilities: { refund: 0.2, deny: 0.7, escalate: 0.1 }, confidence: 0.7 }
+                : { type: "score", score: 2.2, confidence: 0.6 };
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ answers: { q: answer }, usage: { input_tokens: 7, output_tokens: 0 } }));
+        });
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+    await new Promise<void>((resolve) => mockServer.listen(port, "127.0.0.1", resolve));
+
+    const registeredTools: any[] = [];
+    const toolPi: any = {
+      registerProvider: () => {},
+      on: () => {},
+      registerCommand: () => {},
+      registerTool: (config: any) => registeredTools.push(config),
+    };
+    const serverManager = new ServerManager({ stateDir: tempDir, port, host: "127.0.0.1" });
+    registerPlugin(toolPi, { serverManager });
+
+    const byName = Object.fromEntries(registeredTools.map((tool) => [tool.name, tool]));
+    assert.deepEqual(Object.keys(byName).sort(), ["clm_bool", "clm_choice", "clm_score"]);
+    for (const tool of registeredTools) {
+      assert.ok(tool.outputSchema, `${tool.name} must declare an outputSchema so codemode gets structuredContent`);
+    }
+
+    try {
+      const [boolRes, choiceRes, scoreRes] = await Promise.all([
+        byName.clm_bool.execute("c1", { question: "Is this urgent?" }),
+        byName.clm_choice.execute("c2", {
+          question: "How should this be handled?",
+          criteria: { refund: "Issue a refund", deny: "Deny the claim", escalate: "Escalate" },
+        }),
+        byName.clm_score.execute("c3", { question: "Rate severity.", criteria: [1, 2, 3, 4, 5] }),
+      ]);
+
+      assert.deepEqual(boolRes.structuredContent, {
+        answer: "yes",
+        probabilities: { yes: 0.8, no: 1 - 0.8 },
+        confidence: 0.8,
+        question: "Is this urgent?",
+      });
+      // The text content mirrors the structure; codemode scripts get structuredContent.
+      assert.deepEqual(JSON.parse(boolRes.content[0].text), boolRes.structuredContent);
+
+      assert.equal(choiceRes.structuredContent.answer, "deny");
+      assert.equal(choiceRes.structuredContent.probabilities.deny, 0.7);
+      assert.equal(choiceRes.structuredContent.confidence, 0.7);
+      assert.deepEqual(
+        Object.keys(choiceRes.structuredContent.probabilities).sort(),
+        ["deny", "escalate", "refund"],
+      );
+
+      // The wire protocol reports a continuous expected index: 2.2 must map
+      // to the nearest criterion ("3" / value 3), not leak a raw fraction.
+      assert.deepEqual(scoreRes.structuredContent, {
+        answer: "3",
+        value: 3,
+        confidence: 0.6,
+        question: "Rate severity.",
+      });
+
+      // Default state is { message: question }; an explicit state is classified instead.
+      await byName.clm_score.execute("c4", { question: "Rate severity.", state: { message: "Customer was charged twice" } });
+      assert.equal(wireRequests[0].state.message, "Is this urgent?");
+      assert.equal(wireRequests[0].questions.q.type, "noul");
+      const last = wireRequests[wireRequests.length - 1];
+      assert.equal(last.state.message, "Customer was charged twice");
+      assert.equal(last.questions.q.instructions, "Rate severity.");
+      assert.deepEqual(last.questions.q.criteria, ["1", "2", "3", "4", "5"]);
+
+      // Classifier failures reject instead of returning malformed answers.
+      await assert.rejects(byName.clm_bool.execute("c5", { question: "boom" }), /error/i);
+    } finally {
+      await serverManager.stop();
+      await new Promise((resolve) => mockServer.close(resolve));
+    }
+  });
+
   await t.test("first classify call triggers download and server start if needed", async () => {
     const testCache = await fsp.mkdtemp(path.join(tempDir, "first-call-test-"));
     const mockHfPort = 8798;
@@ -350,10 +465,8 @@ test("Extension index end-to-end classify test suite", async (t) => {
 
     let classifyCalls = 0;
     const mockRunningServer = http.createServer((req, res) => {
-      if (req.url === "/health") {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ status: "ok", model: "clm-latest" }));
-      } else if (req.url === "/v1/systemone") {
+      if (serveHealth(req, res)) return;
+      if (req.url === "/v1/systemone") {
         classifyCalls++;
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -533,6 +646,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
     const mockPi: any = {
       registerProvider: () => {},
       on: () => {},
+      registerTool: () => {},
       registerCommand: (_id: string, config: any) => {
         commandConfig = config;
       },
@@ -582,10 +696,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
     // /clm start: attaches to an already-healthy server without downloading
     // (mock on defaultPort — the port this plugin's ServerManager already has)
     const mockStart = http.createServer((req, res) => {
-      if (req.url === "/health") {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ status: "ok", model: "clm-latest" }));
-      } else {
+      if (!serveHealth(req, res)) {
         res.writeHead(404);
         res.end();
       }

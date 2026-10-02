@@ -56,6 +56,41 @@ The choice is persisted (in `config.json` under `PI_CLM_STATE_DIR`) and reused b
 
 Note: the pre-compiled native server supports only the 8-bit checkpoint (see [native/clm-server](native/clm-server#constraints)); the 4-bit and 5-bit variants are served automatically by the Python fallback, and `PI_CLM_SERVER_BIN=""` forces the Python fallback for the 8-bit checkpoint too (both require `uv`).
 
+## Code-mode interface
+
+The extension registers codemode-exposed tools (`clm_bool`, `clm_choice`, `clm_score`, namespace `clm`) so agents running in code-mode sandboxes can call the classifier programmatically and get structured JSON back instead of parsing rendered tool text. Every tool declares an `outputSchema`, so codemode scripts receive its `structuredContent` — a `ClmAnswer` — directly:
+
+```ts
+interface ClmAnswer<T extends string = string> {
+  answer: T;               // "yes" | "no" | chosen criterion
+  probabilities: Record<T, number>;
+  confidence: number;
+  question: string;
+}
+// clm_score instead returns: { answer, value, confidence, question }
+```
+
+```ts
+const [urgent, action] = await Promise.all([
+  tools.clm_bool({ question: "Is this urgent?" }),
+  tools.clm_choice({
+    question: "How should this be handled?",
+    criteria: { refund: "Issue a refund", deny: "Deny the claim", escalate: "Escalate" },
+  }),
+]);
+// urgent.answer === "yes"; action.probabilities.refund === 0.2; …
+const severity = await tools.clm_score({ question: "Rate severity.", criteria: [1, 2, 3, 4, 5] });
+// severity.value === 4
+```
+
+Each call classifies `state` (defaulting to `{ message: question }`); pass `state` to classify a specific text. The typed helpers are also exported for programmatic use:
+
+```ts
+import { createClm } from "pi-clm";
+const clm = createClm(classify); // classify: (context: ClassifierContext) => Promise<ClassifierResult>
+const answer = await clm.choice("How should this be handled?", { refund: "…", deny: "…", escalate: "…" });
+```
+
 ## Wire API
 
 The server speaks a "System One" API on `http://127.0.0.1:8700`:
