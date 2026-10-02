@@ -6,8 +6,8 @@ It serves [CLM-v0.1-8B](https://huggingface.co/mlx-community/CLM-v0.1-8B-MLX-8bi
 
 - Typed answers with probabilities and confidence — fast, deterministic in shape.
 - Local and private — Metal via MLX, binds `127.0.0.1` only, no API key.
-- One shared background server across Pi sessions (ref-counted lockfile), ~8.6 GB model in unified memory once.
-- Zero Python required — prefers the pre-compiled `bin/clm-server` (Swift/MLX), falls back to `uv run server/server.py`.
+- One shared background server across Pi sessions (ref-counted lockfile), the default ~8.6 GB model in unified memory once (lighter variants via the menu below).
+- Zero Python required for the default model — prefers the pre-compiled `bin/clm-server` (Swift/MLX), falls back to `uv run server/server.py` (non-default quantization variants always use the fallback).
 - Standard HF hub cache layout — snapshots from other HF tools are adopted without re-downloading.
 
 ## Requirements
