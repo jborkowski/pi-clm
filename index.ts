@@ -139,18 +139,13 @@ export default async function (pi: ExtensionAPI, extensionOptions?: ExtensionOpt
     }
   });
 
-  // First use: no model/quantization choice saved yet — point the user at
-  // the menu without interrupting anything.
+  // First use: the extension starts silently with its defaults; the
+  // discoverability hint for /clm configure lives in the README.
   pi.on("session_start", async (_event, ctx) => {
     if (repoOverrideNotice) {
       ctx.ui.notify(repoOverrideNotice, "info");
       repoOverrideNotice = null;
     }
-    if (savedConfig) return;
-    ctx.ui.notify(
-      "CLM: no model variant chosen yet — run /clm configure to pick a model and quantization level (4-bit recommended for memory-constrained Macs). Using the default meanwhile.",
-      "info"
-    );
   });
 
   /** Minimal UI surface needed by the configure menu. */
