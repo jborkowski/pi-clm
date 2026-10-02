@@ -1,7 +1,7 @@
 class PiClmServer < Formula
   desc "Native MLX server for the CLM (Contrastive Language Model) classifier"
   homepage "https://github.com/jborkowski/pi-clm"
-  url "git@github.com:jborkowski/pi-clm.git", tag: "v0.1.0", using: :git
+  url "https://github.com/jborkowski/pi-clm", tag: "v0.1.0"
   version "0.1.0"
 
   # MLX/Metal require Apple Silicon; Swift build needs Xcode + Metal toolchain
