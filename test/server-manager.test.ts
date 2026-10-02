@@ -14,6 +14,16 @@ import {
 } from "../src/server-manager.ts";
 import { freePort } from "./helpers.ts";
 
+/** Fake servers exec `node`: the interpreter running the tests themselves. */
+const NODE = process.execPath;
+
+/**
+ * Python for the fake `uv` fallback: the system interpreter when present, so
+ * the fallback stays reachable even when a version-manager shim on PATH is
+ * blocked by the OS firewall for inbound connections.
+ */
+const PYTHON = fs.existsSync("/usr/bin/python3") ? "/usr/bin/python3" : "python3";
+
 function createMockHealthServer(port: number, modelName = "clm-latest"): Promise<{ server: http.Server; close: () => Promise<void> }> {
   const server = http.createServer((req, res) => {
     if (req.url === "/health") {
@@ -187,7 +197,7 @@ test("native server binary detection and preference", async (t) => {
     "#!/bin/sh\n" +
       "if [ \"$1\" = \"--capabilities\" ]; then echo '{\"quantization_bits\":[4,5,8]}'; exit 0; fi\n" +
       "echo \"$@\" > \"$ARGS_OUT\"\n" +
-      "exec python3 \"$MOCK_SERVER\" \"$@\"\n",
+      `exec ${NODE} "$MOCK_SERVER" "$@"` + "\n",
     { mode: 0o755 }
   );
 
@@ -310,7 +320,7 @@ test("native server binary detection and preference", async (t) => {
     const stateDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-native-state-"));
     process.env.PI_CLM_SERVER_BIN = fakeBin;
     process.env.ARGS_OUT = argsFile;
-    process.env.MOCK_SERVER = path.resolve(process.cwd(), "test/fixtures/mock-server.py");
+    process.env.MOCK_SERVER = path.resolve(process.cwd(), "test/fixtures/mock-server.mjs");
     try {
       await fn({ argsFile, stateDir });
     } finally {
@@ -372,7 +382,7 @@ test("native server binary detection and preference", async (t) => {
     );
     const uvDir = path.join(tempDir, "fake-uv-dir");
     await fsp.mkdir(uvDir, { recursive: true });
-    await fsp.writeFile(path.join(uvDir, "uv"), "#!/bin/sh\nshift\nexec python3 \"$@\"\n", { mode: 0o755 });
+    await fsp.writeFile(path.join(uvDir, "uv"), `#!/bin/sh\nshift\nexec ${PYTHON} "$@"\n`, { mode: 0o755 });
 
     const port = await freePort();
     const stateDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-fallback-state-"));

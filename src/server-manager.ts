@@ -228,7 +228,7 @@ export async function buildServerCommand(options: {
 export class ServerManager {
   private options: ResolvedServerManagerOptions;
   private process: ChildProcess | null = null;
-  private logStream: fs.WriteStream | null = null;
+  private logFd: number | null = null;
   private sessionId: string;
   private isOwner = false;
   private startPromise: Promise<{ pid: number; port: number; host: string }> | null = null;
@@ -444,7 +444,7 @@ export class ServerManager {
 
     await fsp.mkdir(this.options.stateDir, { recursive: true });
     const logFilePath = this.options.logPath;
-    this.logStream = fs.createWriteStream(logFilePath, { flags: "a" });
+    this.logFd = fs.openSync(logFilePath, "a");
 
     const commandOptions = {
       port: this.options.port,
@@ -468,20 +468,20 @@ export class ServerManager {
   /** Spawn a server command, record its lock entry, and wait until healthy. */
   private async launchServer(cmd: { command: string; args: string[] }): Promise<{ pid: number; port: number; host: string }> {
     const logFilePath = this.options.logPath;
+    // Hand the log file descriptor to the child directly (no JS-side
+    // piping): the server's output reaches the log file without routing
+    // every chunk through this process.
+    const stdio: ["ignore", number, number] | ["ignore", "pipe", "pipe"] = this.logFd
+      ? ["ignore", this.logFd, this.logFd]
+      : ["ignore", "pipe", "pipe"];
     const child = spawn(cmd.command, cmd.args, {
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio,
       detached: false,
     });
 
     this.process = child;
     this.isOwner = true;
 
-    if (child.stdout && this.logStream) {
-      child.stdout.pipe(this.logStream, { end: false });
-    }
-    if (child.stderr && this.logStream) {
-      child.stderr.pipe(this.logStream, { end: false });
-    }
 
     let spawnError: Error | null = null;
     child.on("error", (err: Error) => {
@@ -574,9 +574,9 @@ export class ServerManager {
 
     await this.removeLockFile();
 
-    if (this.logStream) {
-      this.logStream.end();
-      this.logStream = null;
+    if (this.logFd !== null) {
+      fs.closeSync(this.logFd);
+      this.logFd = null;
     }
     this.process = null;
     this.isOwner = false;
