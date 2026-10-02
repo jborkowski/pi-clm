@@ -1,7 +1,20 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import type { ClassifierModel, ClassifierContext, ClassifierOptions, ClassifierResult } from "@earendil-works/pi-ai";
-import { ServerManager, DEFAULT_PORT } from "./src/server-manager.ts";
+import {
+  MODELS,
+  formatVariantLine,
+  loadConfig,
+  saveConfig,
+  resolveRepo,
+  type ClmConfig,
+} from "./src/model-config.ts";
+import {
+  ServerManager,
+  DEFAULT_PORT,
+  getNativeServerBinPath,
+  isNativeServerSupportedRepo,
+} from "./src/server-manager.ts";
 import { status, download, type ModelManagerOptions } from "./src/model-manager.ts";
 import {
   ClmStatusTracker,
@@ -10,6 +23,7 @@ import {
   type PanelActions,
 } from "./src/status-panel.ts";
 export * from "./src/model-manager.ts";
+export * from "./src/model-config.ts";
 export * from "./src/server-manager.ts";
 export * from "./src/status-panel.ts";
 
@@ -19,7 +33,7 @@ export interface ExtensionOptions {
   statusTracker?: ClmStatusTracker;
 }
 
-export default function (pi: ExtensionAPI, extensionOptions?: ExtensionOptions) {
+export default async function (pi: ExtensionAPI, extensionOptions?: ExtensionOptions) {
   // Pi aliases this public entrypoint for extensions outside node_modules.
   // Arbitrary pi-ai subpath imports are not resolved by that loader.
   const typesafe = builtinProviders().find((provider) => provider.id === "typesafe");
@@ -35,9 +49,31 @@ export default function (pi: ExtensionAPI, extensionOptions?: ExtensionOptions) 
 
   const statusTracker = extensionOptions?.statusTracker ?? new ClmStatusTracker();
 
+  // Apply a persisted model/quantization choice on startup. When the menu
+  // was never opened there is no config file and defaults stay untouched.
+  const configStateDir = serverManager.getStateDir();
+  let savedConfig = await loadConfig(configStateDir);
+  if (savedConfig) {
+    serverManager.setModelRepo(resolveRepo(savedConfig));
+  }
+
+  // The saved /clm configure choice is the single source of truth: when a
+  // programmatic modelOptions.repo was registered and a different choice is
+  // already saved, say so once instead of silently diverging.
+  const pinnedRepo = extensionOptions?.modelOptions?.repo;
+  let repoOverrideNotice: string | null = null;
+  if (pinnedRepo && savedConfig) {
+    const effectiveRepo = resolveRepo(savedConfig);
+    if (effectiveRepo !== pinnedRepo) {
+      repoOverrideNotice =
+        `CLM: using the saved /clm configure choice (${effectiveRepo}); it overrides the registered modelOptions.repo (${pinnedRepo})`;
+    }
+  }
+
   const modelManagerOptions = (): ModelManagerOptions => ({
     ...serverManager.getModelOptions(),
     ...extensionOptions?.modelOptions,
+    repo: serverManager.getModelRepo(),
   });
 
   /** Recompute tracker state from disk + health checks. */
@@ -105,14 +141,102 @@ export default function (pi: ExtensionAPI, extensionOptions?: ExtensionOptions) 
     }
   });
 
+  // First use: no model/quantization choice saved yet — point the user at
+  // the menu without interrupting anything.
+  pi.on("session_start", async (_event, ctx) => {
+    if (repoOverrideNotice) {
+      ctx.ui.notify(repoOverrideNotice, "info");
+      repoOverrideNotice = null;
+    }
+    if (savedConfig) return;
+    ctx.ui.notify(
+      "CLM: no model variant chosen yet — run /clm configure to pick a model and quantization level (4-bit recommended for memory-constrained Macs). Using the default meanwhile.",
+      "info"
+    );
+  });
+
+  /** Minimal UI surface needed by the configure menu. */
+  interface ConfigureUI {
+    select(title: string, options: string[]): Promise<string | undefined>;
+    notify(message: string, level: "info" | "error"): Promise<void> | void;
+  }
+
+  /**
+   * Friendly model/quantization selection menu. Persists the choice in the
+   * extension config and applies it to future downloads and server starts.
+   */
+  const runConfigureMenu = async (ui: ConfigureUI): Promise<void> => {
+    const modelChoice = await ui.select(
+      "CLM: choose a model",
+      MODELS.map((m) => m.label)
+    );
+    if (modelChoice === undefined) {
+      await ui.notify("CLM: configuration cancelled", "info");
+      return;
+    }
+    const chosenModel = MODELS.find((m) => m.label === modelChoice)!;
+
+    const variantChoice = await ui.select(
+      `CLM: choose a quantization level for ${chosenModel.label}`,
+      chosenModel.variants.map((v) => formatVariantLine(chosenModel, v))
+    );
+    if (variantChoice === undefined) {
+      await ui.notify("CLM: configuration cancelled", "info");
+      return;
+    }
+    const chosenVariant = chosenModel.variants.find(
+      (v) => formatVariantLine(chosenModel, v) === variantChoice
+    )!;
+
+    const config: ClmConfig = { modelId: chosenModel.id, quantizationId: chosenVariant.id };
+    await saveConfig(config, configStateDir);
+    savedConfig = config;
+    const repo = resolveRepo(config);
+    serverManager.setModelRepo(repo);
+
+    const usesPythonFallback = !isNativeServerSupportedRepo(repo) && getNativeServerBinPath() !== null;
+    if (usesPythonFallback) {
+      await ui.notify(
+        "CLM: the native server supports the 8-bit checkpoint only — the Python fallback will be used for this variant (requires uv)",
+        "info"
+      );
+    }
+
+    // A running server keeps the old model. Stopping it hands the next start
+    // the new variant, but only this session's own single-owner server is
+    // stopped; a server shared with other sessions or started externally
+    // keeps serving the previous variant until it stops.
+    let serverNote = "";
+    if (await serverManager.isRunning()) {
+      statusTracker.set("stopping");
+      await serverManager.stop();
+      if (await serverManager.isRunning()) {
+        statusTracker.set("ready");
+        serverNote =
+          " — the running server is shared with other sessions or was started externally; it keeps serving the previous variant until it stops";
+      } else {
+        statusTracker.set("downloaded");
+        serverNote = usesPythonFallback
+          ? " — server stopped; it will start with the new variant on next use via the Python fallback"
+          : " — server stopped; it will start with the new variant on next use";
+      }
+    }
+    await ui.notify(
+      `CLM: set to ${chosenModel.label} ${chosenVariant.label} (${chosenVariant.repo})${serverNote}`,
+      "info"
+    );
+  };
+
   // /clm — status panel and server controls
   pi.registerCommand("clm", {
     description: "Show CLM model/server status and start/stop controls",
     handler: async (args, ctx) => {
       const sub = (args ?? "").trim().toLowerCase();
-      if (sub === "start" || sub === "stop" || sub === "status") {
+      if (sub === "configure" || sub === "start" || sub === "stop" || sub === "status") {
         try {
-          if (sub === "start") {
+          if (sub === "configure") {
+            await runConfigureMenu(ctx.ui);
+          } else if (sub === "start") {
             await ensureReady();
             await ctx.ui.notify("CLM: ready", "info");
           } else if (sub === "stop") {
