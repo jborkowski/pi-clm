@@ -1,44 +1,227 @@
 /**
- * Typed programmatic interface for code-mode agents (issue #9).
+ * Typed judgment primitives for code-mode agents.
  *
- * Code-mode sandboxes get structured JSON answers from the CLM classifier
- * instead of parsing rendered tool text. The surface mirrors the `px`
- * extension's `createPx` pattern: a small factory returning typed helpers
- * (`bool`, `choice`, `score`) that resolve to plain `ClmAnswer` objects and
- * compose naturally with `Promise.all`.
+ * One call judges one `state` — the evidence under consideration — against a
+ * fan-out of independent, caller-labeled questions. Questions are a
+ * discriminated union of three kinds (`bool`, `choice`, `score`), and every
+ * answer carries its full probability distribution as first-class data:
  *
- * The helpers reuse the extension's existing typed-question machinery (the
- * `typesafe-system-one` classify call); only the calling surface is new.
+ * - `bool` answers report `probability` of true (0–1). No separate
+ *   confidence: the probability is the whole story.
+ * - `choice` answers report the chosen key plus the distribution, with a
+ *   derived confidence of `(pmax - 1/n) / (1 - 1/n)` — 0 for a uniform
+ *   distribution, 1 for certainty.
+ * - `score` answers report the probability-weighted position across the
+ *   ordered levels (normalized 0–1, so it can fall between levels), a legend
+ *   mapping level positions to their texts, the distribution, and a derived
+ *   confidence that accounts for the distance between levels: mass split
+ *   between adjacent levels is less uncertain than mass split between
+ *   extremes.
+ *
+ * What to do with a probability or confidence is application policy — these
+ * primitives report distributions and never bake in thresholds.
  */
 
-import type { ClassifierContext, ClassifierQuestion, ClassifierResult, JsonObject } from "@earendil-works/pi-ai";
+import type { ClassifierContext, ClassifierQuestion, ClassifierResult, JsonObject, JsonValue } from "@earendil-works/pi-ai";
 
-/** A structured answer over a set of labeled criteria. */
-export interface ClmAnswer<T extends string = string> {
-  /** The chosen criterion — "yes" | "no" for bool questions. */
-  answer: T;
-  /** Full probability distribution over the criteria keys. */
-  probabilities: Record<T, number>;
-  /** Probability of the chosen answer (0–1). */
-  confidence: number;
-  /** The question that was asked. */
-  question: string;
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+/** Free-form field text: a string or a structured object. */
+export type ClmText = string | Record<string, unknown>;
+
+/**
+ * The evidence being judged, given once per call. Plain objects pass through
+ * as-is; scalars and arrays are wrapped so the classifier still sees labeled
+ * text (`message` for scalars, `items` for arrays).
+ */
+export type ClmEvidence = string | number | boolean | Record<string, unknown> | unknown[];
+
+/** Normalize any `ClmEvidence` into the object the classifier context requires. */
+function normalizeState(state: ClmEvidence): JsonObject {
+  if (typeof state === "object" && state !== null && !Array.isArray(state)) return state as JsonObject;
+  if (Array.isArray(state)) return { items: state as JsonValue[] };
+  return { message: state };
 }
 
-export type ClmBoolAnswer = ClmAnswer<"yes" | "no">;
+/** Render a criterion value as the text the classifier sees. */
+function criterionText(value: ClmText | null | undefined): string {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return "";
+  return JSON.stringify(value);
+}
 
-/** Score answers carry a numeric value; the wire protocol reports no distribution. */
+// ---------------------------------------------------------------------------
+// Questions
+// ---------------------------------------------------------------------------
+
+/** A yes/no question; the answer reports P(true). */
+export interface ClmBoolQuestion {
+  kind: "bool";
+  instructions: ClmText;
+  criteria?: { true?: ClmText | null; false?: ClmText | null };
+}
+
+/** A single-choice question over caller-named criteria. */
+export interface ClmChoiceQuestion {
+  kind: "choice";
+  instructions: ClmText;
+  criteria: Record<string, ClmText | null>;
+}
+
+/** A scoring question over ordered levels (2–10, lowest to highest). */
+export interface ClmScoreQuestion {
+  kind: "score";
+  instructions: ClmText;
+  criteria: Array<ClmText>;
+}
+
+export type ClmQuestion = ClmBoolQuestion | ClmChoiceQuestion | ClmScoreQuestion;
+
+/** A set of questions keyed by caller-chosen stable ids. */
+export type ClmQuestionSet = Record<string, ClmQuestion>;
+
+// ---------------------------------------------------------------------------
+// Answers
+// ---------------------------------------------------------------------------
+
+export interface ClmBoolAnswer {
+  kind: "bool";
+  /** P(true), 0–1. */
+  probability: number;
+}
+
+export interface ClmChoiceAnswer {
+  kind: "choice";
+  /** The highest-probability key. */
+  choice: string;
+  /** Full distribution over the criteria keys. */
+  probabilities: Record<string, number>;
+  /** `(pmax - 1/n) / (1 - 1/n)`: 0 for uniform, 1 for certain. */
+  confidence: number;
+}
+
 export interface ClmScoreAnswer {
-  answer: string;
-  value: number;
+  kind: "score";
+  /**
+   * Probability-weighted position across the levels, normalized 0–1
+   * (level `i` of `n` sits at `i / (n - 1)`), so it can fall between levels.
+   */
+  score: number;
+  /** Level position → level text, for interpretation. */
+  legend: Record<string, string>;
+  /** Distribution over the level positions. */
+  probabilities: Record<string, number>;
+  /** Distance-aware confidence: adjacent splits count less than extreme splits. */
   confidence: number;
-  question: string;
 }
 
-/** Criteria labels for `score` when none are supplied: 1 (lowest) … 5 (highest). */
-export const DEFAULT_SCORE_CRITERIA: readonly string[] = ["1", "2", "3", "4", "5"];
+/** The answer type a question kind produces. */
+export type ClmAnswerFor<Q extends ClmQuestion> =
+  Q extends ClmBoolQuestion ? ClmBoolAnswer
+  : Q extends ClmChoiceQuestion ? ClmChoiceAnswer
+  : Q extends ClmScoreQuestion ? ClmScoreAnswer
+  : never;
 
-/** Minimal classify surface the helpers need (satisfied by the extension's classify wrapper). */
+/** Answers keyed by the same ids as the questions. */
+export type ClmAnswers<Q extends ClmQuestionSet> = { [K in keyof Q]: ClmAnswerFor<Q[K]> };
+
+// ---------------------------------------------------------------------------
+// Derived confidence
+// ---------------------------------------------------------------------------
+
+const clamp01 = (n: number): number => Math.max(0, Math.min(1, n));
+
+/** Choice confidence: 0 for a uniform distribution, 1 for certainty. */
+function choiceConfidence(probabilities: number[]): number {
+  const n = probabilities.length;
+  if (n < 2) return 1;
+  const pmax = Math.max(...probabilities);
+  return clamp01((pmax - 1 / n) / (1 - 1 / n));
+}
+
+/**
+ * Score confidence: `1 - 2·sqrt(Σ p_i · d_i²)` where `d_i` is each level's
+ * distance from the expected position on a 0–1 scale. All mass on one level
+ * gives 1; a spread counts for more the farther apart the levels carrying it.
+ */
+function scoreConfidence(positions: number[], probabilities: number[], expected: number): number {
+  let variance = 0;
+  for (let i = 0; i < positions.length; i++) variance += probabilities[i] * (positions[i] - expected) ** 2;
+  return clamp01(1 - 2 * Math.sqrt(variance));
+}
+
+// ---------------------------------------------------------------------------
+// Wire translation
+// ---------------------------------------------------------------------------
+
+function instructionText(instructions: ClmText): string {
+  return typeof instructions === "string" ? instructions : JSON.stringify(instructions);
+}
+
+/**
+ * Translate a question to the classifier wire protocol. Score questions ride
+ * the choice wire as an ordered set of indexed level candidates — the same
+ * candidate texts a score question produces — so the full distribution over
+ * levels comes back as first-class data.
+ */
+export function toWireQuestion(question: ClmQuestion): ClassifierQuestion {
+  const instructions = instructionText(question.instructions);
+  switch (question.kind) {
+    case "bool":
+      return {
+        type: "bool",
+        instructions,
+        criteria: {
+          true: criterionText(question.criteria?.true),
+          false: criterionText(question.criteria?.false),
+        },
+      };
+    case "choice": {
+      const entries = Object.entries(question.criteria);
+      if (entries.length < 1) {
+        throw new Error("choice questions need a non-empty criteria object");
+      }
+      if (entries.length > 256) {
+        throw new Error("choice questions need at most 256 criteria");
+      }
+      const criteria: Record<string, string> = {};
+      for (const [key, value] of entries) criteria[key] = criterionText(value);
+      return { type: "choice", instructions, criteria };
+    }
+    case "score": {
+      if (question.criteria.length < 2 || question.criteria.length > 10) {
+        throw new Error("score questions need an ordered list of 2–10 levels");
+      }
+      const criteria: Record<string, string> = {};
+      question.criteria.forEach((level, i) => {
+        criteria[String(i)] = criterionText(level);
+      });
+      return { type: "choice", instructions, criteria };
+    }
+  }
+}
+
+/** Pick the highest-probability key from a distribution. */
+function argmax(probabilities: Record<string, number>): string {
+  let best: string | undefined;
+  let bestP = -1;
+  for (const [key, p] of Object.entries(probabilities)) {
+    if (p > bestP) {
+      best = key;
+      bestP = p;
+    }
+  }
+  if (best === undefined) throw new Error("classifier returned an empty probability distribution");
+  return best;
+}
+
+// ---------------------------------------------------------------------------
+// Client
+// ---------------------------------------------------------------------------
+
+/** Minimal classify surface (satisfied by the extension's classify wrapper). */
 export type ClmClassify = (context: ClassifierContext) => Promise<ClassifierResult>;
 
 function requireAnswer(result: ClassifierResult, key: string): NonNullable<ClassifierResult["answers"][string]> {
@@ -50,92 +233,61 @@ function requireAnswer(result: ClassifierResult, key: string): NonNullable<Class
   return answer;
 }
 
-/** Pick the highest-probability key from a distribution. */
-function argmax<T extends string>(probabilities: Record<T, number>): T {
-  let best: T | undefined;
-  let bestP = -1;
-  for (const key of Object.keys(probabilities) as T[]) {
-    const p = probabilities[key];
-    if (p > bestP) {
-      best = key;
-      bestP = p;
+/** Assemble the public answer for one question from its wire answer. */
+function deriveAnswer(question: ClmQuestion, raw: ClassifierResult["answers"][string]): ClmAnswerFor<ClmQuestion> {
+  switch (question.kind) {
+    case "bool": {
+      if (raw.type !== "bool") throw new Error(`expected a bool answer, got "${raw.type}"`);
+      return { kind: "bool", probability: clamp01(raw.probability) };
+    }
+    case "choice": {
+      if (raw.type !== "choice") throw new Error(`expected a choice answer, got "${raw.type}"`);
+      const probabilities = raw.probabilities;
+      const choice = argmax(probabilities);
+      const confidence = choiceConfidence(Object.values(probabilities));
+      return { kind: "choice", choice, probabilities, confidence };
+    }
+    case "score": {
+      if (raw.type !== "choice") throw new Error(`expected a score (choice) answer, got "${raw.type}"`);
+      const levelTexts = question.criteria.map(criterionText);
+      const probabilities = raw.probabilities;
+      const legend: Record<string, string> = {};
+      const positions: number[] = [];
+      const weights: number[] = [];
+      let expected = 0;
+      levelTexts.forEach((_, i) => {
+        const p = probabilities[String(i)] ?? 0;
+        legend[String(i)] = levelTexts[i];
+        positions.push(i / (levelTexts.length - 1));
+        weights.push(p);
+        expected += (i / (levelTexts.length - 1)) * p;
+      });
+      const confidence = scoreConfidence(positions, weights, expected);
+      return { kind: "score", score: clamp01(expected), legend, probabilities, confidence };
     }
   }
-  if (best === undefined) throw new Error("classifier returned an empty probability distribution");
-  return best;
 }
 
 /**
- * Build the typed `clm` helpers over a classify function. Each call answers a
- * single question about `state` (defaulting to `{ message: question }`), so
- * calls are independent and compose with `Promise.all`.
+ * Build the typed `clm` client over a classify function. `ask` is the whole
+ * surface: one state, any number of independent questions, typed answers
+ * keyed by the same ids — fan-out without `Promise.all`.
  */
 export function createClm(classify: ClmClassify) {
-  const ask = (instructions: string, question: ClassifierQuestion, state?: JsonObject) =>
-    classify({ state: state ?? { message: instructions }, questions: { q: question } });
-
   return {
-    /** Ask a yes/no question; returns a ClmAnswer over "yes" | "no". */
-    async bool(question: string, state?: JsonObject): Promise<ClmBoolAnswer> {
-      const result = await ask(question, { type: "bool", instructions: question, criteria: { true: "yes", false: "no" } }, state);
-      const answer = requireAnswer(result, "q");
-      if (answer.type !== "bool") throw new Error(`expected a bool answer, got "${answer.type}"`);
-      const yes = answer.probability;
-      return {
-        answer: yes > 0.5 ? "yes" : "no",
-        probabilities: { yes, no: 1 - yes },
-        confidence: Math.max(yes, 1 - yes),
-        question,
-      };
-    },
-
-    /** Ask a single-choice question over the given criteria; typed over the criteria keys. */
-    async choice<T extends string>(
-      question: string,
-      criteria: Record<T, string>,
-      state?: JsonObject,
-    ): Promise<ClmAnswer<T>> {
-      const result = await ask(question, { type: "choice", instructions: question, criteria }, state);
-      const answer = requireAnswer(result, "q");
-      if (answer.type !== "choice") throw new Error(`expected a choice answer, got "${answer.type}"`);
-      const probabilities = answer.probabilities as Record<T, number>;
-      const chosen = (answer.choice as T) in probabilities ? (answer.choice as T) : argmax(probabilities);
-      return {
-        answer: chosen,
-        probabilities,
-        confidence: probabilities[chosen] ?? 0,
-        question,
-      };
-    },
-
-    /** Ask for a score; criteria default to the labels "1"…"5". */
-    async score(
-      question: string,
-      criteria: readonly (string | number)[] = DEFAULT_SCORE_CRITERIA,
-      state?: JsonObject,
-    ): Promise<ClmScoreAnswer> {
-      const labels = criteria.map(String);
-      const result = await ask(
-        question,
-        { type: "score", instructions: question, criteria: labels },
-        state,
-      );
-      const answer = requireAnswer(result, "q");
-      if (answer.type !== "score") throw new Error(`expected a score answer, got "${answer.type}"`);
-      // The wire protocol reports a continuous expected index (sum(i * p_i)
-      // over softmax probabilities), which is fractional for every real
-      // distribution. Round and clamp to the nearest criterion so `answer` is
-      // a real label and `value` stays on the criteria scale (numeric label
-      // when parseable, else the 0-based index).
-      const index = Math.max(0, Math.min(labels.length - 1, Math.round(answer.score)));
-      const label = labels[index];
-      const numeric = Number(label);
-      return {
-        answer: label,
-        value: Number.isFinite(numeric) ? numeric : index,
-        confidence: answer.confidence,
-        question,
-      };
+    async ask<Q extends ClmQuestionSet>(state: ClmEvidence, questions: Q): Promise<ClmAnswers<Q>> {
+      const ids = Object.keys(questions);
+      if (ids.length < 1 || ids.length > 64) {
+        throw new Error("questions must contain 1–64 questions");
+      }
+      const wireQuestions: Record<string, ClassifierQuestion> = {};
+      for (const id of ids) wireQuestions[id] = toWireQuestion(questions[id]);
+      const result = await classify({ state: normalizeState(state), questions: wireQuestions });
+      const answers: Record<string, unknown> = {};
+      for (const [id, question] of Object.entries(questions)) {
+        answers[id] = deriveAnswer(question, requireAnswer(result, id));
+      }
+      return answers as ClmAnswers<Q>;
     },
   };
 }

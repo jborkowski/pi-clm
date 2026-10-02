@@ -1,32 +1,30 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { ClassifierContext, ClassifierResult, JsonObject } from "@earendil-works/pi-ai";
-import { createClm, DEFAULT_SCORE_CRITERIA, type Clm } from "../src/codemode.ts";
+import type { ClassifierContext, ClassifierResult } from "@earendil-works/pi-ai";
+import { createClm, type Clm } from "../src/codemode.ts";
 
-/** Build a mock classify fn answering `q` from a canned per-type answer. */
+/**
+ * Mock classify answering every question from a canned distribution, so a
+ * single fan-out call gets distinct per-id answers.
+ */
 function mockClassify(canned: {
-  bool?: { probability: number };
-  choice?: { choice: string; probabilities: Record<string, number>; confidence: number };
-  score?: { score: number; confidence: number };
+  probabilities?: Record<string, number>;
+  probability?: number;
   stopReason?: ClassifierResult["stopReason"];
   errorMessage?: string;
   capture?: (context: ClassifierContext) => void;
 } = {}): (context: ClassifierContext) => Promise<ClassifierResult> {
   return async (context) => {
     canned.capture?.(context);
-    const question = context.questions.q;
     const answers: Record<string, ClassifierResult["answers"][string]> = {};
-    if (question.type === "bool") {
-      answers.q = { type: "bool", probability: canned.bool?.probability ?? 0.9 };
-    } else if (question.type === "choice") {
-      answers.q = {
-        type: "choice",
-        choice: canned.choice?.choice ?? "",
-        probabilities: canned.choice?.probabilities ?? {},
-        confidence: canned.choice?.confidence ?? 1,
-      };
-    } else {
-      answers.q = { type: "score", score: canned.score?.score ?? 3, confidence: canned.score?.confidence ?? 0.8 };
+    for (const [id, question] of Object.entries(context.questions)) {
+      if (question.type === "bool") {
+        answers[id] = { type: "bool", probability: canned.probability ?? 0.9 };
+      } else {
+        const probabilities = canned.probabilities ?? { a: 0.7, b: 0.3 };
+        const choice = Object.entries(probabilities).sort((x, y) => y[1] - x[1])[0][0];
+        answers[id] = { type: "choice", choice, probabilities, confidence: probabilities[choice] };
+      }
     }
     return {
       api: "typesafe-system-one",
@@ -40,155 +38,132 @@ function mockClassify(canned: {
   };
 }
 
-test("createClm bool maps probability to a yes/no ClmAnswer", async () => {
-  const clm = createClm(mockClassify({ bool: { probability: 0.8 } }));
-  const answer = await clm.bool("Is this urgent?");
-  assert.deepEqual(answer, {
-    answer: "yes",
-    probabilities: { yes: 0.8, no: 0.19999999999999996 },
-    confidence: 0.8,
-    question: "Is this urgent?",
-  });
-});
-
-test("createClm bool below 0.5 flips to no", async () => {
-  const clm = createClm(mockClassify({ bool: { probability: 0.25 } }));
-  const answer = await clm.bool("Should we escalate?");
-  assert.equal(answer.answer, "no");
-  assert.equal(answer.confidence, 0.75);
-});
-
-test("createClm choice returns distribution over criteria keys", async () => {
-  const clm = createClm(
-    mockClassify({
-      choice: {
-        choice: "deny",
-        probabilities: { refund: 0.2, deny: 0.7, escalate: 0.1 },
-        confidence: 0.7,
+test("fan-out: one call, one shared state, three typed answers", async () => {
+  const contexts: ClassifierContext[] = [];
+  const clm: Clm = createClm(mockClassify({ capture: (c) => contexts.push(c) }));
+  const answers = await clm.ask(
+    { message: "Customer was charged twice" },
+    {
+      urgent: { kind: "bool", instructions: "Is this urgent?" },
+      action: {
+        kind: "choice",
+        instructions: "How should this be handled?",
+        criteria: { refund: "Issue a refund", deny: "Deny the claim" },
       },
-    }),
-  );
-  const answer = await clm.choice("How should this be handled?", {
-    refund: "Issue a refund",
-    deny: "Deny the claim",
-    escalate: "Escalate to a human",
-  });
-  assert.equal(answer.answer, "deny");
-  assert.equal(answer.confidence, 0.7);
-  assert.deepEqual(Object.keys(answer.probabilities).sort(), ["deny", "escalate", "refund"]);
-});
-
-test("createClm choice falls back to argmax when the reported choice is unknown", async () => {
-  const clm = createClm(
-    mockClassify({
-      choice: { choice: "nonsense", probabilities: { a: 0.3, b: 0.6 }, confidence: 0.6 },
-    }),
-  );
-  const answer = await clm.choice("Pick one", { a: "Option A", b: "Option B" });
-  assert.equal(answer.answer, "b");
-  assert.equal(answer.confidence, 0.6);
-});
-
-test("createClm score maps the index to the criterion label and numeric value", async () => {
-  const clm = createClm(mockClassify({ score: { score: 4, confidence: 0.9 } }));
-  const answer = await clm.score("Rate severity.");
-  assert.deepEqual(answer, {
-    answer: "5",
-    value: 5,
-    confidence: 0.9,
-    question: "Rate severity.",
-  });
-  assert.equal(DEFAULT_SCORE_CRITERIA.length, 5);
-});
-
-test("createClm score accepts custom numeric criteria", async () => {
-  const clm = createClm(mockClassify({ score: { score: 0, confidence: 0.5 } }));
-  const answer = await clm.score("Rate effort", [0, 2, 5, 8]);
-  assert.equal(answer.answer, "0");
-  assert.equal(answer.value, 0);
-});
-
-test("createClm score rounds a fractional index to the nearest criterion", async () => {
-  const clm = createClm(mockClassify({ score: { score: 2.2, confidence: 0.6 } }));
-  const answer = await clm.score("Rate severity.");
-  assert.deepEqual(answer, {
-    answer: "3",
-    value: 3,
-    confidence: 0.6,
-    question: "Rate severity.",
-  });
-});
-
-test("createClm score clamps a fractional index outside the criteria range", async () => {
-  const high = createClm(mockClassify({ score: { score: 4.7, confidence: 0.4 } }));
-  assert.deepEqual(await high.score("Rate severity."), {
-    answer: "5",
-    value: 5,
-    confidence: 0.4,
-    question: "Rate severity.",
-  });
-  const low = createClm(mockClassify({ score: { score: -0.3, confidence: 0.4 } }));
-  assert.deepEqual(await low.score("Rate severity."), {
-    answer: "1",
-    value: 1,
-    confidence: 0.4,
-    question: "Rate severity.",
-  });
-});
-
-test("createClm score maps fractional indices through custom numeric criteria", async () => {
-  const clm = createClm(mockClassify({ score: { score: 2.4, confidence: 0.7 } }));
-  const answer = await clm.score("Rate effort", [0, 2, 5, 8]);
-  assert.equal(answer.answer, "5");
-  assert.equal(answer.value, 5);
-});
-
-test("createClm score with non-numeric labels picks the nearest label for integer and fractional indices", async () => {
-  for (const serverScore of [2, 1.6]) {
-    const clm = createClm(mockClassify({ score: { score: serverScore, confidence: 0.5 } }));
-    const answer = await clm.score("How bad?", ["low", "medium", "high"]);
-    assert.equal(answer.answer, "high", `server score ${serverScore}`);
-    assert.equal(answer.value, 2, `server score ${serverScore}`);
-  }
-});
-
-test("createClm calls compose with Promise.all over one shared classify fn", async () => {
-  let calls = 0;
-  const classify = mockClassify({
-    score: { score: 2, confidence: 0.8 },
-    choice: { choice: "a", probabilities: { a: 0.6, b: 0.4 }, confidence: 0.6 },
-    capture: () => {
-      calls++;
+      severity: { kind: "score", instructions: "Rate severity.", criteria: ["low", "medium", "high"] },
     },
+  );
+  // Exactly one classify call: fan-out happens inside, not via Promise.all.
+  assert.equal(contexts.length, 1);
+  // All questions saw the same state.
+  assert.deepEqual(contexts[0].state, { message: "Customer was charged twice" });
+  // Answers are keyed by the question ids and carry their kinds.
+  assert.deepEqual(Object.keys(answers), ["urgent", "action", "severity"]);
+  assert.equal(answers.urgent.kind, "bool");
+  assert.equal(answers.action.kind, "choice");
+  assert.equal(answers.severity.kind, "score");
+});
+
+test("bool answer reports P(true) with no separate confidence", async () => {
+  const clm = createClm(mockClassify({ probability: 0.8 }));
+  const { yes } = await clm.ask("state", {
+    yes: { kind: "bool", instructions: "Is this urgent?" },
   });
-  const clm: Clm = createClm(classify);
-  const [boolAnswer, choiceAnswer, scoreAnswer] = await Promise.all([
-    clm.bool("Urgent?"),
-    clm.choice("Action?", { a: "Do a", b: "Do b" }),
-    clm.score("Severity?"),
-  ]);
-  assert.equal(boolAnswer.answer, "yes");
-  assert.equal(choiceAnswer.answer, "a");
-  assert.equal(scoreAnswer.value, 3);
-  assert.equal(calls, 3);
+  assert.deepEqual(yes, { kind: "bool", probability: 0.8 });
 });
 
-test("createClm defaults state to { message: question } and passes custom state through", async () => {
-  let seen: ClassifierContext | undefined;
-  const classify = mockClassify({ capture: (c) => (seen = c) });
-  const clm = createClm(classify);
-
-  await clm.bool("Is this urgent?");
-  assert.deepEqual(seen?.state, { message: "Is this urgent?" });
-
-  const custom: JsonObject = { message: "Customer was charged twice" };
-  await clm.bool("Is this urgent?", custom);
-  assert.equal(seen?.state, custom);
+test("choice confidence is (pmax - 1/n) / (1 - 1/n)", async () => {
+  const clm = createClm(mockClassify({ probabilities: { refund: 0.2, deny: 0.7, escalate: 0.1 } }));
+  const { action } = await clm.ask("state", {
+    action: { kind: "choice", instructions: "Pick", criteria: { refund: "r", deny: "d", escalate: "e" } },
+  });
+  assert.equal(action.choice, "deny");
+  assert.equal(action.confidence, (0.7 - 1 / 3) / (1 - 1 / 3));
+  // Uniform over n gives 0; certain gives 1.
+  const uniform = createClm(mockClassify({ probabilities: { a: 0.5, b: 0.5 } }));
+  const { q: u } = await uniform.ask("state", { q: { kind: "choice", instructions: "Pick", criteria: { a: "A", b: "B" } } });
+  assert.equal(u.confidence, 0);
+  const certain = createClm(mockClassify({ probabilities: { a: 1, b: 0 } }));
+  const { q: c } = await certain.ask("state", { q: { kind: "choice", instructions: "Pick", criteria: { a: "A", b: "B" } } });
+  assert.equal(c.confidence, 1);
 });
 
-test("createClm surfaces classifier errors instead of malformed answers", async () => {
+test("score is the probability-weighted position with a legend", async () => {
+  const clm = createClm(mockClassify({ probabilities: { "0": 0.2, "1": 0.6, "2": 0.2 } }));
+  const { severity } = await clm.ask("state", {
+    severity: { kind: "score", instructions: "Rate severity.", criteria: ["low", "medium", "high"] },
+  });
+  // Level i of n sits at i/(n-1): E = 0.2*0 + 0.6*0.5 + 0.2*1 = 0.5.
+  assert.equal(severity.score, 0.5);
+  assert.deepEqual(severity.legend, { "0": "low", "1": "medium", "2": "high" });
+  assert.deepEqual(severity.probabilities, { "0": 0.2, "1": 0.6, "2": 0.2 });
+});
+
+test("score confidence counts distance between levels", async () => {
+  // Same 50/50 split, adjacent levels vs opposite extremes on a 5-level scale.
+  const adjacent = createClm(mockClassify({ probabilities: { "0": 0, "1": 0, "2": 0.5, "3": 0.5, "4": 0 } }));
+  const { a } = await adjacent.ask("state", {
+    a: { kind: "score", instructions: "Rate", criteria: ["1", "2", "3", "4", "5"] },
+  });
+  const extremes = createClm(mockClassify({ probabilities: { "0": 0.5, "1": 0, "2": 0, "3": 0, "4": 0.5 } }));
+  const { b } = await extremes.ask("state", {
+    b: { kind: "score", instructions: "Rate", criteria: ["1", "2", "3", "4", "5"] },
+  });
+  // Adjacent split: positions 0.5/0.75, E = 0.625, d = ±0.125 → conf = 1 - 2*0.125 = 0.75.
+  assert.ok(Math.abs(a.confidence - 0.75) < 1e-12);
+  // Extremes: maximal spread → 0.
+  assert.equal(b.confidence, 0);
+  assert.ok(a.confidence > b.confidence);
+  // All mass on one level → 1.
+  const single = createClm(mockClassify({ probabilities: { "0": 0, "1": 1, "2": 0 } }));
+  const { s } = await single.ask("state", {
+    s: { kind: "score", instructions: "Rate", criteria: ["low", "medium", "high"] },
+  });
+  assert.equal(s.confidence, 1);
+});
+
+test("score rejects level counts outside 2-10", async () => {
+  const clm = createClm(mockClassify());
+  await assert.rejects(
+    clm.ask("state", { q: { kind: "score", instructions: "Rate", criteria: ["low"] } }),
+    /2–10 levels/,
+  );
+  await assert.rejects(
+    clm.ask("state", { q: { kind: "score", instructions: "Rate", criteria: ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"] } }),
+    /2–10 levels/,
+  );
+});
+
+test("non-object state is wrapped: scalars as message, arrays as items", async () => {
+  const contexts: ClassifierContext[] = [];
+  const clm = createClm(mockClassify({ capture: (c) => contexts.push(c) }));
+  await clm.ask("double charge", { q: { kind: "bool", instructions: "Urgent?" } });
+  await clm.ask(["a", "b"], { q: { kind: "bool", instructions: "Urgent?" } });
+  assert.deepEqual(contexts[0].state, { message: "double charge" });
+  assert.deepEqual(contexts[1].state, { items: ["a", "b"] });
+});
+
+test("questions translate to the wire protocol", async () => {
+  const contexts: ClassifierContext[] = [];
+  const clm = createClm(mockClassify({ capture: (c) => contexts.push(c) }));
+  await clm.ask("state", {
+    b: { kind: "bool", instructions: "Urgent?", criteria: { true: "Payment captured", false: null } },
+    c: { kind: "choice", instructions: "Pick", criteria: { a: "Option A", b: "" } },
+    s: { kind: "score", instructions: "Rate", criteria: ["low", "high"] },
+  });
+  const [b, c, s] = ["b", "c", "s"].map((id) => contexts[0].questions[id]);
+  assert.deepEqual(b, { type: "bool", instructions: "Urgent?", criteria: { true: "Payment captured", false: "" } });
+  assert.deepEqual(c, { type: "choice", instructions: "Pick", criteria: { a: "Option A", b: "" } });
+  // Score rides the choice wire as indexed level candidates.
+  assert.deepEqual(s, { type: "choice", instructions: "Rate", criteria: { "0": "low", "1": "high" } });
+});
+
+test("errors surface instead of malformed answers", async () => {
   const failing = createClm(mockClassify({ stopReason: "error", errorMessage: "server exploded" }));
-  await assert.rejects(failing.bool("Urgent?"), /server exploded/);
+  await assert.rejects(
+    failing.ask("state", { q: { kind: "bool", instructions: "Urgent?" } }),
+    /server exploded/,
+  );
 
   const noAnswer = createClm(
     async () =>
@@ -201,5 +176,8 @@ test("createClm surfaces classifier errors instead of malformed answers", async 
         timestamp: Date.now(),
       }) as ClassifierResult,
   );
-  await assert.rejects(noAnswer.bool("Urgent?"), /no answer/);
+  await assert.rejects(
+    noAnswer.ask("state", { q: { kind: "bool", instructions: "Urgent?" } }),
+    /no answer/,
+  );
 });

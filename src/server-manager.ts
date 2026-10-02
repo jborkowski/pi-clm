@@ -228,7 +228,7 @@ export async function buildServerCommand(options: {
 export class ServerManager {
   private options: ResolvedServerManagerOptions;
   private process: ChildProcess | null = null;
-  private logStream: fs.WriteStream | null = null;
+  private logFd: number | null = null;
   private sessionId: string;
   private isOwner = false;
   private startPromise: Promise<{ pid: number; port: number; host: string }> | null = null;
@@ -390,6 +390,7 @@ export class ServerManager {
 
     if (!isProcessRunning(lock.pid)) {
       await this.removeLockFile();
+      this.closeLogFd();
       return false;
     }
 
@@ -444,7 +445,8 @@ export class ServerManager {
 
     await fsp.mkdir(this.options.stateDir, { recursive: true });
     const logFilePath = this.options.logPath;
-    this.logStream = fs.createWriteStream(logFilePath, { flags: "a" });
+    this.closeLogFd();
+    this.logFd = fs.openSync(logFilePath, "a");
 
     const commandOptions = {
       port: this.options.port,
@@ -456,32 +458,46 @@ export class ServerManager {
 
     // Native first when the binary reports support for this repo's
     // quantization; a failed native launch falls back to the Python server.
-    const native = await nativeServerCommand(commandOptions);
     try {
-      return await this.launchServer(native ?? pythonServerCommand(commandOptions));
+      const native = await nativeServerCommand(commandOptions);
+      try {
+        return await this.launchServer(native ?? pythonServerCommand(commandOptions));
+      } catch (err) {
+        if (!native) throw err;
+        return await this.launchServer(pythonServerCommand(commandOptions));
+      }
     } catch (err) {
-      if (!native) throw err;
-      return await this.launchServer(pythonServerCommand(commandOptions));
+      this.closeLogFd();
+      throw err;
+    }
+  }
+
+  private closeLogFd(): void {
+    if (this.logFd !== null) {
+      fs.closeSync(this.logFd);
+      this.logFd = null;
     }
   }
 
   /** Spawn a server command, record its lock entry, and wait until healthy. */
   private async launchServer(cmd: { command: string; args: string[] }): Promise<{ pid: number; port: number; host: string }> {
     const logFilePath = this.options.logPath;
+    const logFd = this.logFd;
+    if (logFd === null) {
+      throw new Error("log file must be open before spawning the CLM server");
+    }
+    // Hand the log file descriptor to the child directly (no JS-side
+    // piping): the server's output reaches the log file without routing
+    // every chunk through this process.
+    const stdio: ["ignore", number, number] = ["ignore", logFd, logFd];
     const child = spawn(cmd.command, cmd.args, {
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio,
       detached: false,
     });
 
     this.process = child;
     this.isOwner = true;
 
-    if (child.stdout && this.logStream) {
-      child.stdout.pipe(this.logStream, { end: false });
-    }
-    if (child.stderr && this.logStream) {
-      child.stderr.pipe(this.logStream, { end: false });
-    }
 
     let spawnError: Error | null = null;
     child.on("error", (err: Error) => {
@@ -541,6 +557,7 @@ export class ServerManager {
       if (this.process && this.process.exitCode === null) {
         this.process.kill("SIGTERM");
       }
+      this.closeLogFd();
       return;
     }
 
@@ -550,6 +567,7 @@ export class ServerManager {
     if (lock.refCount > 0) {
       // Other sessions are still using it
       await this.writeLockFile(lock);
+      this.closeLogFd();
       return;
     }
 
@@ -574,10 +592,7 @@ export class ServerManager {
 
     await this.removeLockFile();
 
-    if (this.logStream) {
-      this.logStream.end();
-      this.logStream = null;
-    }
+    this.closeLogFd();
     this.process = null;
     this.isOwner = false;
   }
