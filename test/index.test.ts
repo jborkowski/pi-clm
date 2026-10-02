@@ -951,7 +951,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
     assert.equal(repo, "mlx-community/CLM-v0.1-8B-MLX-4bit");
   });
 
-  await t.test("first-use notice disappears once a choice is saved", async () => {
+  await t.test("session start stays silent even before a choice is saved", async () => {
     const noticeDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-notice-"));
     const prevEnv = process.env.PI_CLM_STATE_DIR;
     process.env.PI_CLM_STATE_DIR = noticeDir;
@@ -963,7 +963,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
 
       const notices: string[] = [];
       await emitSessionStart(sessionHandlers, notices);
-      assert.ok(notices.some((n) => n.includes("no model variant chosen yet")), notices.join("\n"));
+      assert.equal(notices.length, 0, notices.join("\n"));
 
       notices.length = 0;
       const ctx: any = makeConfigureCtx((m: string) => notices.push(m));
