@@ -390,6 +390,7 @@ export class ServerManager {
 
     if (!isProcessRunning(lock.pid)) {
       await this.removeLockFile();
+      this.closeLogFd();
       return false;
     }
 
@@ -444,6 +445,7 @@ export class ServerManager {
 
     await fsp.mkdir(this.options.stateDir, { recursive: true });
     const logFilePath = this.options.logPath;
+    this.closeLogFd();
     this.logFd = fs.openSync(logFilePath, "a");
 
     const commandOptions = {
