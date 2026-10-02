@@ -11,10 +11,10 @@ See the [root README](../../README.md) for the product picture and [ADR 003](../
 
 | File | Role |
 |---|---|
-| `main.swift` | CLI: `serve` (`--port`, `--model-path`, `--truncation head\|tail`) and the `parity` subcommand |
+| `main.swift` | CLI: `serve` (`--port`, `--model-path`, `--truncation head\|tail`), `--capabilities` (prints the supported quantization bits as JSON), and the `parity` subcommand |
 | `JSONValue.swift` | Strict JSON parser/serializer with **ordered objects** and int-vs-double distinction, producing Python `json.loads`-style error messages (`Expecting value: line 1 column 1 (char 0)`) and rejecting `NaN`/`Infinity` |
 | `Schema.swift` | Faithful port of `clm_mlx/schema.py`: state/candidate text building, `noul`/`choice`/`score` answers, softmax, TypeSafe-style confidence |
-| `Qwen3Encoder.swift` | Frozen Qwen3-8B encoder: 8-bit group-64 affine-quantized linears (U32-packed weights, BF16 scales), QK-RMSNorm, RoPE, GQA attention, right-padded batches, last-token hidden state after the final RMSNorm (L2-normalised), head/tail truncation |
+| `Qwen3Encoder.swift` | Frozen Qwen3-8B encoder: affine-quantized linears (U32-packed weights, BF16 scales) with checkpoint-driven bits/group size (8-bit-g64 default, 4-bit-g32 / 5-bit variants supported), QK-RMSNorm, RoPE, GQA attention, right-padded batches, last-token hidden state after the final RMSNorm (L2-normalised), head/tail truncation |
 | `Heads.swift` | CLM projection heads (exact-erf GELU, LayerNorm ε=1e-5, clamped logit scale) |
 | `Engine.swift` | Tokenizer wrapper, LRU projection cache, `answer()` with usage accounting |
 | `Server.swift` | Hummingbird app + request validation — byte-level parity with `server.py` (limits, error strings, 413/404/chunked semantics); inference serialized by an actor |
@@ -70,7 +70,10 @@ currently cannot compile the dependency tree) and, once per Xcode,
 ## Constraints
 
 - Apple Silicon only; arm64 Mach-O.
-- Only 8-bit group-64 affine-quantized checkpoints are supported (asserted at load).
+- Affine-quantized checkpoints loaded from U32-packed weights; bits and
+  group size come from the `quantization` block in the encoder's
+  `config.json` (8-bit group-64 by default; 4-bit-g32 and 5-bit variants
+  such as `mlx-community/CLM-v0.1-8B-MLX-4bit` load natively).
 - Head/tail truncation to `max_tokens = 2048`; batch budget 4096 tokens.
 - Qwen3-8B dimensions (hidden 4096, 36 layers, 32/8 heads, head dim 128) are
   defaults read from the encoder's `config.json`.

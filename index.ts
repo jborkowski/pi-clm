@@ -10,12 +10,7 @@ import {
   resolveRepo,
   type ClmConfig,
 } from "./src/model-config.ts";
-import {
-  ServerManager,
-  DEFAULT_PORT,
-  getNativeServerBinPath,
-  isNativeServerSupportedRepo,
-} from "./src/server-manager.ts";
+import { ServerManager, DEFAULT_PORT, getNativeServerBinPath, nativeServerCanServe } from "./src/server-manager.ts";
 import { status, download, type ModelManagerOptions } from "./src/model-manager.ts";
 import {
   ClmStatusTracker,
@@ -197,10 +192,10 @@ export default async function (pi: ExtensionAPI, extensionOptions?: ExtensionOpt
     const repo = resolveRepo(config);
     serverManager.setModelRepo(repo);
 
-    const usesPythonFallback = !isNativeServerSupportedRepo(repo) && getNativeServerBinPath() !== null;
+    const usesPythonFallback = getNativeServerBinPath() !== null && !(await nativeServerCanServe(repo));
     if (usesPythonFallback) {
       await ui.notify(
-        "CLM: the native server supports the 8-bit checkpoint only — the Python fallback will be used for this variant (requires uv)",
+        "CLM: the available native server does not support this variant's quantization — the Python fallback will be used for it (requires uv)",
         "info"
       );
     }

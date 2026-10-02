@@ -7,7 +7,7 @@ It serves [CLM-v0.1-8B](https://huggingface.co/mlx-community/CLM-v0.1-8B-MLX-8bi
 - Typed answers with probabilities and confidence — fast, deterministic in shape.
 - Local and private — Metal via MLX, binds `127.0.0.1` only, no API key.
 - One shared background server across Pi sessions (ref-counted lockfile), the default ~8.6 GB model in unified memory once (lighter variants via the menu below).
-- Zero Python required for the default model — prefers the pre-compiled `bin/clm-server` (Swift/MLX), falls back to `uv run server/server.py` (non-default quantization variants always use the fallback).
+- Zero Python required — prefers the pre-compiled `bin/clm-server` (Swift/MLX) for every published variant (4-bit, 5-bit, 8-bit), falls back to `uv run server/server.py` when no capable native binary is available or the native server fails to start.
 - Standard HF hub cache layout — snapshots from other HF tools are adopted without re-downloading.
 
 ## Requirements
@@ -54,7 +54,7 @@ Run `/clm configure` to pick a model and quantization level from a friendly menu
 
 The choice is persisted (in `config.json` under `PI_CLM_STATE_DIR`) and reused by later sessions. If you never open the menu, nothing changes: the existing default (8-bit) stays in effect. On first use the extension points you at `/clm configure`. After a change, a server owned solely by the current session is stopped so the next start uses the new variant; a server shared with other sessions or started externally keeps serving the previous variant until it stops.
 
-Note: the pre-compiled native server supports only the 8-bit checkpoint (see [native/clm-server](native/clm-server#constraints)); the 4-bit and 5-bit variants are served automatically by the Python fallback, and `PI_CLM_SERVER_BIN=""` forces the Python fallback for the 8-bit checkpoint too (both require `uv`).
+Note: a variant is served natively only when the native binary reports support for its quantization (`clm-server --capabilities`; pre-capability binaries such as brew v0.1.0 are 8-bit-only, so 4/5-bit uses the Python fallback until a rebuilt binary ships) — see [native/clm-server](native/clm-server#constraints); `PI_CLM_SERVER_BIN=""` forces the Python fallback for any variant (requires `uv`).
 
 ## Code-mode interface
 
@@ -142,7 +142,7 @@ bin/clm-server parity test/fixtures/native-parity-reference.json \
   --model-path <model-snapshot-dir> --truncation head   # engine parity vs Python
 ```
 
-The native server is resolved as: `PI_CLM_SERVER_BIN` → packaged `bin/clm-server` → `pi-clm-server` on `PATH` (e.g. a Homebrew install) → Python fallback. It is only used for the 8-bit checkpoint; every other quantization variant always starts the Python fallback.
+The native server is resolved as: `PI_CLM_SERVER_BIN` → packaged `bin/clm-server` → `pi-clm-server` on `PATH` (e.g. a Homebrew install) → Python fallback. It is used only for published CLM checkpoints whose quantization bits it reports supporting via `--capabilities` (binaries that cannot answer, such as brew v0.1.0, are treated as 8-bit-only); any other repo — and any native server that fails to start — uses the Python fallback.
 
 To rebuild everything:
 

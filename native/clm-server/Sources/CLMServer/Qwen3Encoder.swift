@@ -3,15 +3,19 @@ import MLX
 import MLXFast
 import MLXNN
 
-/// Affine-quantized linear (8-bit, group 64) loaded from U32-packed weights.
+/// Affine-quantized linear loaded from U32-packed weights.
 /// Mirrors the `mx.quantized_matmul` path mlx-lm uses for these checkpoints.
+/// Bits/group size come from the checkpoint's `quantization` config (8-bit
+/// group-64 by default, but 4-bit-g32 / 5-bit variants load the same way).
 struct QuantizedLinear {
-    let weight: MLXArray   // [out, in/4] uint32
-    let scales: MLXArray   // [out, in/64]
-    let biases: MLXArray   // [out, in/64]
+    let weight: MLXArray   // [out, in*bits/32] uint32 (bits-driven)
+    let scales: MLXArray
+    let biases: MLXArray
+    let groupSize: Int
+    let bits: Int
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        quantizedMM(x, weight, scales: scales, biases: biases, transpose: true, groupSize: 64, bits: 8)
+        quantizedMM(x, weight, scales: scales, biases: biases, transpose: true, groupSize: groupSize, bits: bits)
     }
 }
 
@@ -39,10 +43,12 @@ final class Qwen3Layer {
 
     init(weights: [String: MLXArray], prefix: String, cfg: Qwen3Encoder.Config, rope: RoPE) {
         func ql(_ name: String) -> QuantizedLinear {
-            QuantizedLinear(
+            let quant = cfg.quant(for: "\(prefix).\(name)")
+            return QuantizedLinear(
                 weight: weights["\(prefix).\(name).weight"]!,
                 scales: weights["\(prefix).\(name).scales"]!,
-                biases: weights["\(prefix).\(name).biases"]!)
+                biases: weights["\(prefix).\(name).biases"]!,
+                groupSize: quant.groupSize, bits: quant.bits)
         }
         qProj = ql("self_attn.q_proj")
         kProj = ql("self_attn.k_proj")
@@ -95,7 +101,7 @@ final class Qwen3Layer {
     }
 }
 
-/// Qwen3-8B (8-bit affine-quantized MLX checkpoint) as CLM's frozen encoder.
+/// Qwen3-8B (affine-quantized MLX checkpoint, bits per its config) as CLM's frozen encoder.
 /// Reproduces `clm_mlx/encoder.py`: last-token hidden state after the final
 /// RMSNorm, float32, L2-normalised. Batches are right-padded; attention is
 /// causal, so pad tokens after a sequence cannot change its last real token.
@@ -109,12 +115,32 @@ final class Qwen3Encoder {
         var intermediateSize = 12288
         var rmsNormEps: Float = 1e-6
         var ropeTheta: Float = 1_000_000
+        /// Checkpoint quantization: 8-bit group-64 affine unless the
+        /// `quantization` object in config.json says otherwise (e.g. 4-bit-g32).
+        var defaultQuant = Quantization(bits: 8, groupSize: 64)
+        var quantOverrides: [String: (Int, Int)] = [:]  // module prefix -> (bits, groupSize)
+
+        /// Quantization for a module: a per-module override when the config
+        /// carries one, else the checkpoint default.
+        func quant(for module: String) -> Quantization {
+            if let (b, g) = quantOverrides[module] {
+                return Quantization(bits: b, groupSize: g)
+            }
+            return defaultQuant
+        }
+    }
+
+    struct Quantization: Equatable {
+        var bits: Int
+        var groupSize: Int
     }
 
     let config: Config
-    let embedWeight: MLXArray  // [vocab, hidden/4] uint32
+    let embedWeight: MLXArray  // [vocab, hidden*bits/32] uint32 (bits-driven)
     let embedScales: MLXArray
     let embedBiases: MLXArray
+    let embedGroupSize: Int
+    let embedBits: Int
     let layers: [Qwen3Layer]
     let normWeight: MLXArray
     let rope: RoPE
@@ -156,6 +182,10 @@ final class Qwen3Encoder {
             config.intermediateSize = readInt("intermediate_size", 12288)
             config.rmsNormEps = readFloat("rms_norm_eps", 1e-6)
             config.ropeTheta = readFloat("rope_theta", 1_000_000)
+            if let q = Self.parseQuantization(c["quantization"]) {
+                config.defaultQuant = q.default
+                config.quantOverrides = q.overrides
+            }
         }
         self.config = config
         let ropeLocal = RoPE(dimensions: config.headDim, traditional: false, base: config.ropeTheta)
@@ -166,10 +196,39 @@ final class Qwen3Encoder {
         embedWeight = weights["model.embed_tokens.weight"]!
         embedScales = weights["model.embed_tokens.scales"]!
         embedBiases = weights["model.embed_tokens.biases"]!
+        let embedQuant = config.quant(for: "model.embed_tokens")
+        embedGroupSize = embedQuant.groupSize
+        embedBits = embedQuant.bits
         normWeight = weights["model.norm.weight"]!
         layers = (0..<config.numLayers).map { i in
             Qwen3Layer(weights: weights, prefix: "model.layers.\(i)", cfg: config, rope: ropeLocal)
         }
+    }
+
+    /// Parse the `quantization` object from config.json (mlx-lm format):
+    /// top-level `bits` (with `group_size` defaulting to 64 when absent, as
+    /// mlx-lm does) plus optional per-module override entries (e.g.
+    /// `"model.embed_tokens": {"bits": 6, "group_size": 32}`); a partial
+    /// override inherits the missing field from the top-level default, as
+    /// mlx-lm's loader does. Configs that are not objects or lack top-level
+    /// bits return nil so callers keep the 8-bit-g64 default.
+    static func parseQuantization(_ value: JSONValue?) -> (default: Quantization, overrides: [String: (Int, Int)])? {
+        guard case .object(let q)? = value else { return nil }
+        guard case .int(let bits)? = q["bits"] else { return nil }
+        var groupSize = 64
+        if case .int(let g)? = q["group_size"] { groupSize = Int(g) }
+        let def = Quantization(bits: Int(bits), groupSize: groupSize)
+        var overrides: [String: (Int, Int)] = [:]
+        for (k, v) in q.pairs {
+            guard case .object(let o) = v else { continue }
+            var b: Int?
+            if case .int(let x)? = o["bits"] { b = Int(x) }
+            var g: Int?
+            if case .int(let x)? = o["group_size"] { g = Int(x) }
+            if b == nil && g == nil { continue }
+            overrides[k] = (b ?? def.bits, g ?? def.groupSize)
+        }
+        return (def, overrides)
     }
 
     static func loadShards(encoderDir: URL) throws -> [String: MLXArray] {
@@ -244,7 +303,7 @@ final class Qwen3Encoder {
         let rowW = embedWeight.take(ids, axis: 0)
         let rowS = embedScales.take(ids, axis: 0)
         let rowB = embedBiases.take(ids, axis: 0)
-        var h = dequantized(rowW, scales: rowS, biases: rowB, groupSize: 64, bits: 8)
+        var h = dequantized(rowW, scales: rowS, biases: rowB, groupSize: embedGroupSize, bits: embedBits)
 
         let mask = Self.causalMask(L)
 
