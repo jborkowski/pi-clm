@@ -30,7 +30,7 @@ brew tap jborkowski/pi-clm
 brew install pi-clm-server
 ```
 
-Bottle and formula versions track the repo's GitHub releases (`make release-upload` packages and uploads them and syncs the tap formula).
+Bottle and formula versions track the repo's GitHub releases: `make brew-bottle` builds deterministic artifacts and prints their checksums (`dist/sha256s.txt`); after pasting them into the formula, `make release-upload` verifies the formula matches the built artifacts, uploads them, and syncs the tap formula.
 
 The extension registers classifier model `clm-latest` — it is a classifier, not a chat model, so it will not show up in `/model`.
 
