@@ -21,16 +21,16 @@ It serves [CLM-v0.1-8B](https://huggingface.co/mlx-community/CLM-v0.1-8B-MLX-8bi
 pi install git:github.com/jborkowski/pi-clm   # or: pi install ./pi-clm
 ```
 
-### Native server via Homebrew (prebuilt bottle, no compile)
+### Native server via Homebrew (in-repo tap, built from source)
 
-The native `clm-server` binary is distributed as a Homebrew bottle from this repo's tap — no Xcode or Command Line Tools build required:
+The repo is its own Homebrew tap — the software and its formula live in this same repo, with no external `homebrew-*` tap and no release-asset downloads. Build from source (Apple Silicon, full Xcode with the Metal toolchain: `xcodebuild -downloadComponent MetalToolchain`):
 
 ```bash
-brew tap jborkowski/pi-clm
-brew install pi-clm-server
+brew tap jborkowski/pi-clm git@github.com:jborkowski/pi-clm.git
+HOMEBREW_NO_INSTALL_FROM_API=1 brew install --build-from-source jborkowski/pi-clm/pi-clm-server
 ```
 
-Bottle and formula versions track the repo's GitHub releases: `make brew-bottle` builds deterministic artifacts and prints their checksums (`dist/sha256s.txt`); after pasting them into the formula, `make release-upload` verifies the formula matches the built artifacts, uploads them, and syncs the tap formula.
+From a checkout, `make install` does tap → pack (source snapshot into the local tap) → build-from-source install; `make start|stop|restart|status|logs` drive `brew services` (link a model snapshot to `$(brew --prefix)/var/pi-clm/model` first), and `make uninstall` removes both formula and tap.
 
 The extension registers classifier model `clm-latest` — it is a classifier, not a chat model, so it will not show up in `/model`.
 
@@ -65,7 +65,7 @@ Run `/clm configure` to pick a model and quantization level from a friendly menu
 
 The choice is persisted (in `config.json` under `PI_CLM_STATE_DIR`) and reused by later sessions. If you never open the menu, nothing changes: the existing default (8-bit) stays in effect and the extension starts silently with it; run `/clm configure` to pick a variant. After a change, a server owned solely by the current session is stopped so the next start uses the new variant; a server shared with other sessions or started externally keeps serving the previous variant until it stops.
 
-Note: a variant is served natively only when the native binary reports support for its quantization (`clm-server --capabilities`; pre-capability binaries such as brew v0.1.0 are 8-bit-only, so 4/5-bit uses the Python fallback until you `brew upgrade` to the capabilities-aware 0.2.0+ bottle) — see [native/clm-server](native/clm-server#constraints); `PI_CLM_SERVER_BIN=""` forces the Python fallback for any variant (requires `uv`).
+Note: a variant is served natively only when the native binary reports support for its quantization (`clm-server --capabilities`; pre-capability binaries such as brew v0.1.0 are 8-bit-only, so 4/5-bit uses the Python fallback until you `brew upgrade` to a capabilities-aware 0.2.0+ build) — see [native/clm-server](native/clm-server#constraints); `PI_CLM_SERVER_BIN=""` forces the Python fallback for any variant (requires `uv`).
 
 ## Judgment primitives
 
@@ -167,7 +167,7 @@ bin/clm-server parity test/fixtures/native-parity-reference.json \
   --model-path <model-snapshot-dir> --truncation head   # engine parity vs Python
 ```
 
-The native server is resolved as: `PI_CLM_SERVER_BIN` → packaged `bin/clm-server` → `pi-clm-server` on `PATH` (e.g. the Homebrew bottle install — see [Install](#install)) → Python fallback. It is used only for published CLM checkpoints whose quantization bits it reports supporting via `--capabilities` (binaries that cannot answer, such as brew v0.1.0, are treated as 8-bit-only); any other repo — and any native server that fails to start — uses the Python fallback.
+The native server is resolved as: `PI_CLM_SERVER_BIN` → packaged `bin/clm-server` → `pi-clm-server` on `PATH` (e.g. the Homebrew install — see [Install](#install)) → Python fallback. It is used only for published CLM checkpoints whose quantization bits it reports supporting via `--capabilities` (binaries that cannot answer, such as brew v0.1.0, are treated as 8-bit-only); any other repo — and any native server that fails to start — uses the Python fallback.
 
 To rebuild everything:
 

@@ -5,7 +5,6 @@ MODEL ?=
 PORT  ?= 8700
 TRUNC ?= head
 VERSION ?= $(shell node -p "require('./package.json').version")
-TARBALL := dist/clm-server-$(VERSION)-macos-arm64.tar.gz
 
 
 SWIFT_DIR  := native/clm-server
@@ -92,66 +91,70 @@ clean: ## Remove Swift build artifacts and dist output
 	cd $(SWIFT_DIR) && swift package clean
 	rm -rf dist
 
-# --- Homebrew release workflow (prebuilt bottle, no compile-on-install) ---
-# `make brew-bottle` packages the release binary + SwiftPM resource bundles
-# + MLX's mlx.metallib into dist/: a brew bottle tarball (pi-clm-server-<V>.<tag>.bottle.tar.gz)
-# and a plain binary tarball used as the formula's stable URL. Packaging is
-# deterministic (fixed mtimes, gzip -n); both sha256 sums are written to
-# dist/sha256s.txt — paste them and the new version into Formula/pi-clm-server.rb.
-# `make release-upload` (run after the paste) verifies the formula matches
-# the built dist/ artifacts exactly, then tags v<V>, uploads those artifacts
-# as a GitHub release on jborkowski/pi-clm, and pushes the formula to the
-# homebrew-pi-clm tap. It never rebuilds.
-BREW          ?= brew
-TAP           := jborkowski/pi-clm
-GH            ?= gh-axi
-BOTTLE_TAG    ?= arm64_tahoe
-BOTTLE        := dist/pi-clm-server-$(VERSION).$(BOTTLE_TAG).bottle.tar.gz
-RELEASE_TAG   := v$(VERSION)
-RELEASE_NOTES ?= "Prebuilt arm64 macOS release (bottle + binary tarball)."
-STAGING       := /tmp/pi-clm-bottle
-PINNED_MTIME  := 202501010000
+# --- Homebrew (in-repo tap: this repo IS the tap, no external tap repos) ---
+# Workflow: tap (this repo over SSH) -> pack (source snapshot into the local
+# tap) -> install (build from source). The formula prefers the packed tarball
+# and falls back to building the tagged release straight from the repo, so
+# installs never depend on GitHub release assets or a homebrew-* repo.
+# `make start/stop/restart/status/logs` drive `brew services` (the formula has
+# a service block; link a model snapshot to $(brew --prefix)/var/pi-clm/model).
+BREW    ?= brew
+TAP     := jborkowski/pi-clm
+FORMULA := $(TAP)/pi-clm-server
+export HOMEBREW_NO_AUTO_UPDATE ?= 1
+export HOMEBREW_NO_INSTALL_FROM_API ?= 1
 
-.PHONY: brew-bottle release-upload uninstall
+.PHONY: tap pack install uninstall start stop restart status logs
 
-brew-bottle: install-bin
-	rm -rf dist && mkdir -p dist
-	@test -n "$(VERSION)" || { echo "error: cannot derive version (package.json)"; exit 1; }
-	rm -rf $(STAGING) && mkdir -p "$(STAGING)/pi-clm-server/$(VERSION)/bin" "$(STAGING)/pi-clm-server/$(VERSION)/libexec" "$(STAGING)/src"
-	cp $(SERVER_BIN) "$(STAGING)/pi-clm-server/$(VERSION)/libexec/clm-server"
-	cp -R $(PRODUCTS)/*.bundle "$(STAGING)/pi-clm-server/$(VERSION)/libexec/"
-	cp $(METALLIB) "$(STAGING)/pi-clm-server/$(VERSION)/libexec/mlx.metallib"
-	printf '#!/bin/bash\nexec "$$(dirname "$$(readlink -f "$$0")")/../libexec/clm-server" "$$@"\n' > "$(STAGING)/pi-clm-server/$(VERSION)/bin/pi-clm-server"
-	chmod +x "$(STAGING)/pi-clm-server/$(VERSION)/bin/pi-clm-server"
-	cp $(SERVER_BIN) "$(STAGING)/src/clm-server"
-	cp -R $(PRODUCTS)/*.bundle "$(STAGING)/src/"
-	cp $(METALLIB) "$(STAGING)/src/mlx.metallib"
-	find $(STAGING) -exec touch -t $(PINNED_MTIME) {} +
-	(cd $(STAGING) && tar -cf - pi-clm-server) | gzip -n > $(BOTTLE)
-	(cd $(STAGING)/src && tar -cf - clm-server mlx.metallib *.bundle) | gzip -n > $(TARBALL)
-	@shasum -a 256 $(BOTTLE) $(TARBALL) | sed 's|dist/||' > dist/sha256s.txt
-	@cat dist/sha256s.txt
+tap:
+	@if ! $(BREW) tap | grep -qx "$(TAP)"; then \
+		$(BREW) tap "$(TAP)" "git@github.com:$(TAP).git"; \
+	fi
 
-release-upload:
-	@test -f "$(BOTTLE)" -a -f "$(TARBALL)" || { echo "error: $(BOTTLE) and $(TARBALL) not built — run make brew-bottle first"; exit 1; }
-	@F_VERSION=$$(sed -n 's/^  version "\(.*\)"/\1/p' Formula/pi-clm-server.rb); \
-	F_URL_SHA=$$(sed -n "s/^  sha256 \"\([0-9a-f]\{64\}\)\"/\1/p" Formula/pi-clm-server.rb); \
-	F_BOTTLE_SHA=$$(sed -n "s/.*$(BOTTLE_TAG): \"\([0-9a-f]\{64\}\)\"/\1/p" Formula/pi-clm-server.rb); \
-	A_URL_SHA=$$(shasum -a 256 $(TARBALL) | cut -d' ' -f1); \
-	A_BOTTLE_SHA=$$(shasum -a 256 $(BOTTLE) | cut -d' ' -f1); \
-	ok=1; \
-	[ "$$F_VERSION" = "$(VERSION)" ] || { echo "error: formula version '$$F_VERSION' != package.json $(VERSION) — update Formula/pi-clm-server.rb"; ok=0; }; \
-	[ "$$F_URL_SHA" = "$$A_URL_SHA" ] || { echo "error: formula url sha256 does not match $(TARBALL) — paste the sha256 from dist/sha256s.txt"; ok=0; }; \
-	[ "$$F_BOTTLE_SHA" = "$$A_BOTTLE_SHA" ] || { echo "error: formula bottle sha256 does not match $(BOTTLE) — paste the sha256 from dist/sha256s.txt"; ok=0; }; \
-	[ "$$ok" = 1 ] || exit 1
-	$(GH) release create $(RELEASE_TAG) -R $(TAP) --notes $(RELEASE_NOTES) $(BOTTLE) $(TARBALL) || \
-		$(GH) release upload $(RELEASE_TAG) -R $(TAP) --clobber $(BOTTLE) $(TARBALL)
-	@TAP_FILE="repos/jborkowski/homebrew-pi-clm/contents/Formula/pi-clm-server.rb"; \
-	SHA=$$($(GH) api "$$TAP_FILE" --jq .sha 2>/dev/null || true); \
-	COMMIT=$$($(GH) api --method PUT "$$TAP_FILE" -f message="pi-clm-server $(RELEASE_TAG)" \
-		-f content="$$(base64 < Formula/pi-clm-server.rb)" $${SHA:+-f sha=$$SHA} --jq .commit.sha); \
-	test -n "$$COMMIT" || { echo "error: tap formula push failed"; exit 1; }; \
-	echo "tap synced: jborkowski/homebrew-pi-clm@$$COMMIT"
+pack: tap
+	@TAPDIR="$$( $(BREW) --repo $(TAP) )"; \
+	mkdir -p "$$TAPDIR/Formula"; \
+	rm -rf "$$TAPDIR/build-src" "$$TAPDIR/pi-clm-server-src.tar.gz"; \
+	rsync -a \
+		--exclude '.git/' \
+		--exclude 'bin/' \
+		--exclude 'dist/' \
+		--exclude 'node_modules/' \
+		--exclude 'native/clm-server/.build/' \
+		--exclude '.tmp-e2e/' \
+		--exclude '.cursor/' \
+		--exclude '.agents/' \
+		--exclude '.claude/' \
+		--exclude '.pi/' \
+		--exclude '.DS_Store' \
+		./ "$$TAPDIR/build-src/"; \
+	tar -C "$$TAPDIR" -czf "$$TAPDIR/pi-clm-server-src.tar.gz" build-src; \
+	cp -f Formula/pi-clm-server.rb "$$TAPDIR/Formula/pi-clm-server.rb"; \
+	echo "packed $$TAPDIR/pi-clm-server-src.tar.gz"
+
+install: pack
+	@if $(BREW) list --formula "$(FORMULA)" >/dev/null 2>&1; then \
+		$(BREW) reinstall --build-from-source "$(FORMULA)"; \
+	else \
+		$(BREW) install --build-from-source "$(FORMULA)"; \
+	fi
 
 uninstall:
-	-$(BREW) uninstall $(TAP)/pi-clm-server
+	-$(BREW) uninstall "$(FORMULA)"
+	-$(BREW) untap "$(TAP)"
+
+start:
+	$(BREW) services start $(FORMULA)
+
+stop:
+	$(BREW) services stop $(FORMULA)
+
+restart:
+	$(BREW) services restart $(FORMULA)
+
+status:
+	-$(BREW) services info $(FORMULA)
+
+logs:
+	@prefix="$$($(BREW) --prefix)"; \
+	tail -n 80 -f "$$prefix/var/log/pi-clm-server.log" "$$prefix/var/log/pi-clm-server.err.log"
