@@ -19,6 +19,9 @@ native/clm-server/.build/
 bin/
 dist/
 
+# Local e2e scratch (model snapshots, generated tiny checkpoints, build caches)
+.tmp-e2e/
+
 # Pi agent state
 .pi/
 .skills/
