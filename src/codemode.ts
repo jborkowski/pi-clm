@@ -179,8 +179,15 @@ export function toWireQuestion(question: ClmQuestion): ClassifierQuestion {
         },
       };
     case "choice": {
+      const entries = Object.entries(question.criteria);
+      if (entries.length < 1) {
+        throw new Error("choice questions need a non-empty criteria object");
+      }
+      if (entries.length > 256) {
+        throw new Error("choice questions need at most 256 criteria");
+      }
       const criteria: Record<string, string> = {};
-      for (const [key, value] of Object.entries(question.criteria)) criteria[key] = criterionText(value);
+      for (const [key, value] of entries) criteria[key] = criterionText(value);
       return { type: "choice", instructions, criteria };
     }
     case "score": {
@@ -236,7 +243,7 @@ function deriveAnswer(question: ClmQuestion, raw: ClassifierResult["answers"][st
     case "choice": {
       if (raw.type !== "choice") throw new Error(`expected a choice answer, got "${raw.type}"`);
       const probabilities = raw.probabilities;
-      const choice = raw.choice in probabilities ? raw.choice : argmax(probabilities);
+      const choice = argmax(probabilities);
       const confidence = choiceConfidence(Object.values(probabilities));
       return { kind: "choice", choice, probabilities, confidence };
     }
@@ -269,8 +276,12 @@ function deriveAnswer(question: ClmQuestion, raw: ClassifierResult["answers"][st
 export function createClm(classify: ClmClassify) {
   return {
     async ask<Q extends ClmQuestionSet>(state: ClmEvidence, questions: Q): Promise<ClmAnswers<Q>> {
+      const ids = Object.keys(questions);
+      if (ids.length < 1 || ids.length > 64) {
+        throw new Error("questions must contain 1–64 questions");
+      }
       const wireQuestions: Record<string, ClassifierQuestion> = {};
-      for (const [id, question] of Object.entries(questions)) wireQuestions[id] = toWireQuestion(question);
+      for (const id of ids) wireQuestions[id] = toWireQuestion(questions[id]);
       const result = await classify({ state: normalizeState(state), questions: wireQuestions });
       const answers: Record<string, unknown> = {};
       for (const [id, question] of Object.entries(questions)) {

@@ -456,24 +456,38 @@ export class ServerManager {
 
     // Native first when the binary reports support for this repo's
     // quantization; a failed native launch falls back to the Python server.
-    const native = await nativeServerCommand(commandOptions);
     try {
-      return await this.launchServer(native ?? pythonServerCommand(commandOptions));
+      const native = await nativeServerCommand(commandOptions);
+      try {
+        return await this.launchServer(native ?? pythonServerCommand(commandOptions));
+      } catch (err) {
+        if (!native) throw err;
+        return await this.launchServer(pythonServerCommand(commandOptions));
+      }
     } catch (err) {
-      if (!native) throw err;
-      return await this.launchServer(pythonServerCommand(commandOptions));
+      this.closeLogFd();
+      throw err;
+    }
+  }
+
+  private closeLogFd(): void {
+    if (this.logFd !== null) {
+      fs.closeSync(this.logFd);
+      this.logFd = null;
     }
   }
 
   /** Spawn a server command, record its lock entry, and wait until healthy. */
   private async launchServer(cmd: { command: string; args: string[] }): Promise<{ pid: number; port: number; host: string }> {
     const logFilePath = this.options.logPath;
+    const logFd = this.logFd;
+    if (logFd === null) {
+      throw new Error("log file must be open before spawning the CLM server");
+    }
     // Hand the log file descriptor to the child directly (no JS-side
     // piping): the server's output reaches the log file without routing
     // every chunk through this process.
-    const stdio: ["ignore", number, number] | ["ignore", "pipe", "pipe"] = this.logFd
-      ? ["ignore", this.logFd, this.logFd]
-      : ["ignore", "pipe", "pipe"];
+    const stdio: ["ignore", number, number] = ["ignore", logFd, logFd];
     const child = spawn(cmd.command, cmd.args, {
       stdio,
       detached: false,
@@ -541,6 +555,7 @@ export class ServerManager {
       if (this.process && this.process.exitCode === null) {
         this.process.kill("SIGTERM");
       }
+      this.closeLogFd();
       return;
     }
 
@@ -550,6 +565,7 @@ export class ServerManager {
     if (lock.refCount > 0) {
       // Other sessions are still using it
       await this.writeLockFile(lock);
+      this.closeLogFd();
       return;
     }
 
@@ -574,10 +590,7 @@ export class ServerManager {
 
     await this.removeLockFile();
 
-    if (this.logFd !== null) {
-      fs.closeSync(this.logFd);
-      this.logFd = null;
-    }
+    this.closeLogFd();
     this.process = null;
     this.isOwner = false;
   }
