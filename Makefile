@@ -7,8 +7,11 @@ TRUNC ?= head
 VERSION ?= $(shell node -p "require('./package.json').version")
 TARBALL := dist/clm-server-$(VERSION)-macos-arm64.tar.gz
 
+
 SWIFT_DIR  := native/clm-server
-PRODUCTS   := $(SWIFT_DIR)/.build/out/Products/Release
+# Prefer the Xcode-generated products dir when present; plain `swift build` puts
+# products in .build/arm64-apple-macosx/release instead.
+PRODUCTS   ?= $(shell test -x $(SWIFT_DIR)/.build/out/Products/Release/CLMServer && echo $(SWIFT_DIR)/.build/out/Products/Release || echo $(SWIFT_DIR)/.build/arm64-apple-macosx/release)
 SERVER_BIN := bin/clm-server
 REFERENCE  := test/fixtures/native-parity-reference.json
 
@@ -24,12 +27,12 @@ deps: ## npm install
 native: deps ## Build native clm-server (Swift release, arm64)
 	cd $(SWIFT_DIR) && swift build -c release --product CLMServer
 
-install-bin: native ## Install binary + Metal bundle into bin/
+install-bin: native ## Install binary + SwiftPM resource bundles into bin/
 	@test -x $(PRODUCTS)/CLMServer || { echo "build products missing in $(PRODUCTS)"; exit 1; }
 	mkdir -p bin
 	cp $(PRODUCTS)/CLMServer $(SERVER_BIN)
-	rm -rf bin/mlx-swift_Cmlx.bundle
-	cp -R $(PRODUCTS)/mlx-swift_Cmlx.bundle bin/
+	rm -rf bin/*.bundle
+	cp -R $(PRODUCTS)/*.bundle bin/
 	@file $(SERVER_BIN)
 
 build: install-bin test ## Everything: build, install, all checks (scripts/build.sh one-shot equivalent)
@@ -73,51 +76,38 @@ clean: ## Remove Swift build artifacts and dist output
 	cd $(SWIFT_DIR) && swift package clean
 	rm -rf dist
 
-# --- Homebrew local-tap workflow (per add-homebrew-formula skill) ---
-# `make pack` snapshots the current working tree (committed *and* uncommitted)
-# into the local tap, and `make install` rebuilds from that snapshot — so every
-# install picks up the latest repo changes. The version comes from `git describe`
-# so `brew info` reports exactly which revision was packed.
-BREW         ?= brew
-TAP          := jborkowski/pi-clm
-FORMULA      := $(TAP)/pi-clm-server
-BREW_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')
-export HOMEBREW_NO_AUTO_UPDATE ?= 1
-export HOMEBREW_NO_INSTALL_FROM_API ?= 1
+# --- Homebrew release workflow (prebuilt bottle, no compile-on-install) ---
+# `make build-bottle` packages the release binary + SwiftPM resource bundles
+# into dist/: a brew bottle tarball (pi-clm-server--<V>.arm64_tahoe.bottle.tar.gz)
+# and a plain binary tarball used as the formula's stable URL. Both sha256
+# sums are printed; paste them into Formula/pi-clm-server.rb.
+# `make release-upload` tags v<V> and uploads both assets as a GitHub release
+# on jborkowski/pi-clm (private repo — assets are fetched with `gh auth`).
+BREW          ?= brew
+TAP           := jborkowski/pi-clm
+GH            ?= gh-axi
+BOTTLE_TAG    ?= arm64_tahoe
+BOTTLE        := dist/pi-clm-server--$(VERSION).$(BOTTLE_TAG).bottle.tar.gz
+RELEASE_TAG   := v$(VERSION)
+RELEASE_NOTES ?= "Prebuilt arm64 macOS release (bottle + binary tarball)."
 
-.PHONY: tap pack install uninstall
+.PHONY: brew-bottle release-upload uninstall
 
-tap:
-	@if ! $(BREW) tap | grep -qx "$(TAP)"; then \
-		$(BREW) tap-new "$(TAP)" --branch main; \
-	fi
+brew-bottle: install-bin
+	rm -rf dist && mkdir -p dist
+	@test -n "$(VERSION)" || { echo "error: cannot derive version (package.json)"; exit 1; }
+	rm -rf /tmp/pi-clm-bottle && mkdir -p "/tmp/pi-clm-bottle/pi-clm-server/$(VERSION)/bin" "/tmp/pi-clm-bottle/pi-clm-server/$(VERSION)/libexec"
+	cp $(SERVER_BIN) "/tmp/pi-clm-bottle/pi-clm-server/$(VERSION)/libexec/clm-server"
+	cp -R $(PRODUCTS)/*.bundle "/tmp/pi-clm-bottle/pi-clm-server/$(VERSION)/libexec/"
+	printf '#!/bin/bash\nexec "/opt/homebrew/opt/pi-clm-server/libexec/clm-server" "$$@"\n' > "/tmp/pi-clm-bottle/pi-clm-server/$(VERSION)/bin/pi-clm-server"
+	chmod +x "/tmp/pi-clm-bottle/pi-clm-server/$(VERSION)/bin/pi-clm-server"
+	tar -C /tmp/pi-clm-bottle -czf $(BOTTLE) pi-clm-server
+	tar -C $(PRODUCTS) -czf $(TARBALL) $$(cd $(PRODUCTS) && ls | grep -v '^\.' | grep -E '^(CLMServer|.*\.bundle)$$' | sed 's:^:./:')
+	@echo "$(BOTTLE)"; echo "bottle sha256: $$(shasum -a 256 $(BOTTLE) | cut -d' ' -f1)"
+	@echo "$(TARBALL)";  echo "url   sha256: $$(shasum -a 256 $(TARBALL) | cut -d' ' -f1)"
 
-pack: tap
-	@test -n "$(BREW_VERSION)" || { echo "error: cannot derive version (git describe failed)"; exit 1; }
-	@TAPDIR="$$($(BREW) --repo $(TAP))"; \
-	mkdir -p "$$TAPDIR/Formula"; \
-	rm -rf "$$TAPDIR/build-src" "$$TAPDIR"/pi-clm-server-*-src.tar.gz; \
-	rsync -a \
-		--exclude '.git' \
-		--exclude '.build/' \
-		--exclude 'bin/' \
-		--exclude 'node_modules/' \
-		--exclude 'dist/' \
-		--exclude '.DS_Store' \
-		./ "$$TAPDIR/build-src/"; \
-	TARBALL="$$TAPDIR/pi-clm-server-$(BREW_VERSION)-src.tar.gz"; \
-	tar -C "$$TAPDIR" -czf "$$TARBALL" build-src; \
-	cp -f Formula/pi-clm-server.rb "$$TAPDIR/Formula/pi-clm-server.rb"; \
-	echo "packed $$TARBALL (version $(BREW_VERSION))"; \
-	echo "sha256: $$(shasum -a 256 "$$TARBALL" | cut -d' ' -f1)"
-
-install: pack
-	@if $(BREW) list --formula "$(FORMULA)" >/dev/null 2>&1; then \
-		$(BREW) reinstall --build-from-source "$(FORMULA)"; \
-	else \
-		$(BREW) install --build-from-source "$(FORMULA)"; \
-	fi
+release-upload: brew-bottle
+	$(GH) release create $(RELEASE_TAG) -R $(TAP) --notes $(RELEASE_NOTES) $(BOTTLE) $(TARBALL)
 
 uninstall:
-	-$(BREW) uninstall "$(FORMULA)"
-	-$(BREW) untap "$(TAP)"
+	-$(BREW) uninstall $(TAP)/pi-clm-server

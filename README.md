@@ -21,6 +21,17 @@ It serves [CLM-v0.1-8B](https://huggingface.co/mlx-community/CLM-v0.1-8B-MLX-8bi
 pi install git:github.com/jborkowski/pi-clm   # or: pi install ./pi-clm
 ```
 
+### Native server via Homebrew (prebuilt bottle, no compile)
+
+The native `clm-server` binary is distributed as a Homebrew bottle from this repo's tap — no Xcode or Command Line Tools build required:
+
+```bash
+brew tap jborkowski/pi-clm
+brew install pi-clm-server
+```
+
+The repo (and its release assets) are private, so the GitHub CLI must be authenticated as a collaborator first — run `gh auth login` once. Bottle and formula versions track the repo's GitHub releases (`make release-upload` packages and uploads them).
+
 The extension registers classifier model `clm-latest` — it is a classifier, not a chat model, so it will not show up in `/model`.
 
 ## Usage
@@ -156,7 +167,7 @@ bin/clm-server parity test/fixtures/native-parity-reference.json \
   --model-path <model-snapshot-dir> --truncation head   # engine parity vs Python
 ```
 
-The native server is resolved as: `PI_CLM_SERVER_BIN` → packaged `bin/clm-server` → `pi-clm-server` on `PATH` (e.g. a Homebrew install) → Python fallback. It is used only for published CLM checkpoints whose quantization bits it reports supporting via `--capabilities` (binaries that cannot answer, such as brew v0.1.0, are treated as 8-bit-only); any other repo — and any native server that fails to start — uses the Python fallback.
+The native server is resolved as: `PI_CLM_SERVER_BIN` → packaged `bin/clm-server` → `pi-clm-server` on `PATH` (e.g. the Homebrew bottle install — see [Install](#install)) → Python fallback. It is used only for published CLM checkpoints whose quantization bits it reports supporting via `--capabilities` (binaries that cannot answer, such as brew v0.1.0, are treated as 8-bit-only); any other repo — and any native server that fails to start — uses the Python fallback.
 
 To rebuild everything:
 
