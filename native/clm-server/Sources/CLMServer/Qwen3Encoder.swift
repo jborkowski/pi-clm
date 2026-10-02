@@ -101,7 +101,7 @@ final class Qwen3Layer {
     }
 }
 
-/// Qwen3-8B (8-bit affine-quantized MLX checkpoint) as CLM's frozen encoder.
+/// Qwen3-8B (affine-quantized MLX checkpoint, bits per its config) as CLM's frozen encoder.
 /// Reproduces `clm_mlx/encoder.py`: last-token hidden state after the final
 /// RMSNorm, float32, L2-normalised. Batches are right-padded; attention is
 /// causal, so pad tokens after a sequence cannot change its last real token.
