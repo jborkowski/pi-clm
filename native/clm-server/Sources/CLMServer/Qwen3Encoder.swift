@@ -206,17 +206,18 @@ final class Qwen3Encoder {
     }
 
     /// Parse the `quantization` object from config.json (mlx-lm format):
-    /// top-level `bits` / `group_size` plus optional per-module override
-    /// entries (e.g. `"model.embed_tokens": {"bits": 6, "group_size": 32}`);
-    /// a partial override inherits the missing field from the top-level
-    /// default, as mlx-lm's loader does. Unknown shapes return nil so callers
-    /// keep the 8-bit-g64 default.
+    /// top-level `bits` (with `group_size` defaulting to 64 when absent, as
+    /// mlx-lm does) plus optional per-module override entries (e.g.
+    /// `"model.embed_tokens": {"bits": 6, "group_size": 32}`); a partial
+    /// override inherits the missing field from the top-level default, as
+    /// mlx-lm's loader does. Configs that are not objects or lack top-level
+    /// bits return nil so callers keep the 8-bit-g64 default.
     static func parseQuantization(_ value: JSONValue?) -> (default: Quantization, overrides: [String: (Int, Int)])? {
         guard case .object(let q)? = value else { return nil }
-        guard case .int(let bits)? = q["bits"],
-              case .int(let groupSize)? = q["group_size"]
-        else { return nil }
-        let def = Quantization(bits: Int(bits), groupSize: Int(groupSize))
+        guard case .int(let bits)? = q["bits"] else { return nil }
+        var groupSize = 64
+        if case .int(let g)? = q["group_size"] { groupSize = Int(g) }
+        let def = Quantization(bits: Int(bits), groupSize: groupSize)
         var overrides: [String: (Int, Int)] = [:]
         for (k, v) in q.pairs {
             guard case .object(let o) = v else { continue }

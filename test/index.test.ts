@@ -912,29 +912,43 @@ test("Extension index end-to-end classify test suite", async (t) => {
     }
   });
 
-  await t.test("/clm configure applies the 4-bit pick without a Python-fallback warning when a native server exists", async () => {
-    const warnDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-native-warn-"));
-    const fakeBin = path.join(warnDir, "fake-clm-server");
-    await fsp.writeFile(fakeBin, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  /** Runs /clm configure (picking 4-bit) with PI_CLM_SERVER_BIN pointing at a fake native binary; restores the env afterwards. */
+  const configureWithNativeBin = async (binScript: string) => {
+    const binDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-native-notice-"));
+    const fakeBin = path.join(binDir, "fake-clm-server");
+    await fsp.writeFile(fakeBin, binScript, { mode: 0o755 });
     const prevBin = process.env.PI_CLM_SERVER_BIN;
+    process.env.PI_CLM_SERVER_BIN = fakeBin;
     try {
-      // 4-bit pick with a native binary present: the native server loads it
-      // too, so there is no fallback warning — the choice is simply applied
-      process.env.PI_CLM_SERVER_BIN = fakeBin;
-      const sm = new ServerManager({ stateDir: warnDir });
+      const sm = new ServerManager({ stateDir: binDir });
       const { notifications } = await runConfigureCommand({ serverManager: sm });
-      assert.ok(
-        !notifications.some((n) => n.includes("Python fallback")),
-        notifications.join("\n")
-      );
-      assert.equal(sm.getModelRepo(), "mlx-community/CLM-v0.1-8B-MLX-4bit");
-      const saved = JSON.parse(await fsp.readFile(path.join(warnDir, "config.json"), "utf-8"));
-      assert.deepEqual(saved, { modelId: "CLM-v0.1-8B", quantizationId: "4bit" });
+      return { notifications, repo: sm.getModelRepo() };
     } finally {
       if (prevBin === undefined) delete process.env.PI_CLM_SERVER_BIN;
       else process.env.PI_CLM_SERVER_BIN = prevBin;
-      await fsp.rm(warnDir, { recursive: true, force: true });
+      await fsp.rm(binDir, { recursive: true, force: true });
     }
+  };
+
+  await t.test("/clm configure announces the Python fallback when the native binary cannot serve the variant", async () => {
+    // pre-capability binary (e.g. brew v0.1.0): cannot report support, 8-bit only
+    const { notifications, repo } = await configureWithNativeBin("#!/bin/sh\nexit 2\n");
+    assert.ok(
+      notifications.some((n) => n.includes("Python fallback") && n.includes("requires uv")),
+      notifications.join("\n")
+    );
+    assert.equal(repo, "mlx-community/CLM-v0.1-8B-MLX-4bit");
+  });
+
+  await t.test("/clm configure applies the 4-bit pick without a fallback notice when the native binary is capable", async () => {
+    const { notifications, repo } = await configureWithNativeBin(
+      "#!/bin/sh\necho '{\"quantization_bits\":[4,5,8]}'\n"
+    );
+    assert.ok(
+      !notifications.some((n) => n.includes("Python fallback")),
+      notifications.join("\n")
+    );
+    assert.equal(repo, "mlx-community/CLM-v0.1-8B-MLX-4bit");
   });
 
   await t.test("first-use notice disappears once a choice is saved", async () => {

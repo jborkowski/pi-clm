@@ -10,7 +10,7 @@ import {
   resolveRepo,
   type ClmConfig,
 } from "./src/model-config.ts";
-import { ServerManager, DEFAULT_PORT } from "./src/server-manager.ts";
+import { ServerManager, DEFAULT_PORT, getNativeServerBinPath, nativeServerCanServe } from "./src/server-manager.ts";
 import { status, download, type ModelManagerOptions } from "./src/model-manager.ts";
 import {
   ClmStatusTracker,
@@ -192,6 +192,14 @@ export default async function (pi: ExtensionAPI, extensionOptions?: ExtensionOpt
     const repo = resolveRepo(config);
     serverManager.setModelRepo(repo);
 
+    const usesPythonFallback = getNativeServerBinPath() !== null && !(await nativeServerCanServe(repo));
+    if (usesPythonFallback) {
+      await ui.notify(
+        "CLM: the available native server does not support this variant's quantization — the Python fallback will be used for it (requires uv)",
+        "info"
+      );
+    }
+
     // A running server keeps the old model. Stopping it hands the next start
     // the new variant, but only this session's own single-owner server is
     // stopped; a server shared with other sessions or started externally
@@ -206,7 +214,9 @@ export default async function (pi: ExtensionAPI, extensionOptions?: ExtensionOpt
           " — the running server is shared with other sessions or was started externally; it keeps serving the previous variant until it stops";
       } else {
         statusTracker.set("downloaded");
-        serverNote = " — server stopped; it will start with the new variant on next use";
+        serverNote = usesPythonFallback
+          ? " — server stopped; it will start with the new variant on next use via the Python fallback"
+          : " — server stopped; it will start with the new variant on next use";
       }
     }
     await ui.notify(

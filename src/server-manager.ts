@@ -175,6 +175,20 @@ function pythonServerCommand(options: {
 }
 
 /**
+ * The native binary that would serve `repo`, or null when none is
+ * available, the repo is not a published variant, or the binary's reported
+ * quantization bits exclude the repo's.
+ */
+async function nativeServerBinForRepo(repo: string): Promise<string | null> {
+  const nativeBin = getNativeServerBinPath();
+  if (!nativeBin) return null;
+  const bits = repoQuantizationBits(repo);
+  if (bits === undefined) return null;
+  const supported = (await getNativeQuantizationBits(nativeBin)) ?? LEGACY_NATIVE_QUANT_BITS;
+  return supported.includes(bits) ? nativeBin : null;
+}
+
+/**
  * The native-server command when a binary is available and reports support
  * for the repo's quantization bits, else null.
  */
@@ -184,12 +198,16 @@ async function nativeServerCommand(options: {
   truncation: string;
   repo: string;
 }): Promise<{ command: string; args: string[]; native: boolean } | null> {
-  const nativeBin = getNativeServerBinPath();
-  if (!nativeBin) return null;
-  const bits = repoQuantizationBits(options.repo);
-  if (bits === undefined) return null;
-  const supported = (await getNativeQuantizationBits(nativeBin)) ?? LEGACY_NATIVE_QUANT_BITS;
-  return supported.includes(bits) ? { command: nativeBin, args: serverFlagArgs(options), native: true } : null;
+  const nativeBin = await nativeServerBinForRepo(options.repo);
+  return nativeBin ? { command: nativeBin, args: serverFlagArgs(options), native: true } : null;
+}
+
+/**
+ * Whether a native binary is available and reports support for the repo's
+ * quantization; false means the Python server (requires uv) will serve it.
+ */
+export async function nativeServerCanServe(repo: string): Promise<boolean> {
+  return (await nativeServerBinForRepo(repo)) !== null;
 }
 
 /**

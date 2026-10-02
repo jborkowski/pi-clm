@@ -34,8 +34,13 @@ final class QuantizationConfigTests: XCTestCase {
         XCTAssertEqual(q?.overrides["model.embed_tokens"]?.1, 32)
     }
 
+    func testTopLevelGroupSizeDefaultsTo64() throws {
+        let q = try parse(#"{"bits": 4}"#)
+        XCTAssertEqual(q?.default, Qwen3Encoder.Quantization(bits: 4, groupSize: 64))
+        XCTAssertEqual(q?.overrides.count, 0)
+    }
+
     func testMissingQuantizationObject() throws {
-        XCTAssertNil(try parse(#"{"bits": 4}"#))  // no group_size
         XCTAssertNil(Qwen3Encoder.parseQuantization(nil))
         XCTAssertNil(Qwen3Encoder.parseQuantization(.null))
         XCTAssertNil(try parse(#"{"group_size": 32}"#))  // no bits
