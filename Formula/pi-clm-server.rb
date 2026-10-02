@@ -10,8 +10,12 @@ class PiClmServer < Formula
   url "https://github.com/jborkowski/pi-clm/releases/download/v#{version}/clm-server-#{version}-macos-arm64.tar.gz"
   sha256 "57332fe31ee25aa5ad45f6b57b56954bf7b20f7aa8d8f46befce948d52441469"
 
+  # Compute the release URL in class scope: the `bottle do ... end` block is
+  # instance_eval'd against BottleSpecification, which has no `version`
+  # method, so interpolating it inside the block makes the formula unloadable.
+  bottle_root_url = "https://github.com/jborkowski/pi-clm/releases/download/v#{version}"
   bottle do
-    root_url "https://github.com/jborkowski/pi-clm/releases/download/v#{version}"
+    root_url bottle_root_url
     sha256 cellar: :any, arm64_tahoe: "93a025d5553db310fdc0067feb46cb38ef3efa8e2cf4b03cfb7f91579ebd561f"
   end
 
