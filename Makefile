@@ -16,7 +16,7 @@ SERVER_BIN := bin/clm-server
 REFERENCE  := test/fixtures/native-parity-reference.json
 
 .DEFAULT_GOAL := help
-.PHONY: help build native install-bin deps test test-swift test-ts typecheck dup parity e2e serve dist clean
+.PHONY: help build native install-bin deps test test-swift test-ts typecheck dup parity e2e serve clean
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | sed -E 's|^([a-zA-Z_-]+):.*## (.*)|  \1\t\2|' | awk -F'\t' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -64,30 +64,22 @@ serve: ## Run the server in the foreground (MODEL=..., PORT=8700, TRUNC=head)
 	@test -n "$(MODEL)" || { echo "usage: make serve MODEL=<model-snapshot-dir>"; exit 2; }
 	$(SERVER_BIN) --port $(PORT) --model-path $(MODEL) --truncation $(TRUNC)
 
-dist: install-bin ## Build release tar.gz + Homebrew formula into dist/
-	rm -rf dist && mkdir -p dist
-	tar -czf $(TARBALL) -C bin clm-server mlx-swift_Cmlx.bundle
-	@SHA=$$(shasum -a 256 $(TARBALL) | cut -d' ' -f1); \
-	sed -e "s|__VERSION__|$(VERSION)|g" -e "s|__SHA256__|$$SHA|g" \
-		scripts/pi-clm-server.rb.tpl > dist/pi-clm-server.rb; \
-	echo "$(TARBALL)"; echo "sha256: $$SHA"; ls -la dist/
-
 clean: ## Remove Swift build artifacts and dist output
 	cd $(SWIFT_DIR) && swift package clean
 	rm -rf dist
 
 # --- Homebrew release workflow (prebuilt bottle, no compile-on-install) ---
-# `make build-bottle` packages the release binary + SwiftPM resource bundles
-# into dist/: a brew bottle tarball (pi-clm-server--<V>.arm64_tahoe.bottle.tar.gz)
+# `make brew-bottle` packages the release binary + SwiftPM resource bundles
+# into dist/: a brew bottle tarball (pi-clm-server-<V>.<tag>.bottle.tar.gz)
 # and a plain binary tarball used as the formula's stable URL. Both sha256
 # sums are printed; paste them into Formula/pi-clm-server.rb.
-# `make release-upload` tags v<V> and uploads both assets as a GitHub release
-# on jborkowski/pi-clm (private repo — assets are fetched with `gh auth`).
+# `make release-upload` tags v<V>, uploads both assets as a GitHub release
+# on jborkowski/pi-clm, and pushes the updated formula to the homebrew-pi-clm tap.
 BREW          ?= brew
 TAP           := jborkowski/pi-clm
 GH            ?= gh-axi
 BOTTLE_TAG    ?= arm64_tahoe
-BOTTLE        := dist/pi-clm-server--$(VERSION).$(BOTTLE_TAG).bottle.tar.gz
+BOTTLE        := dist/pi-clm-server-$(VERSION).$(BOTTLE_TAG).bottle.tar.gz
 RELEASE_TAG   := v$(VERSION)
 RELEASE_NOTES ?= "Prebuilt arm64 macOS release (bottle + binary tarball)."
 
@@ -99,15 +91,19 @@ brew-bottle: install-bin
 	rm -rf /tmp/pi-clm-bottle && mkdir -p "/tmp/pi-clm-bottle/pi-clm-server/$(VERSION)/bin" "/tmp/pi-clm-bottle/pi-clm-server/$(VERSION)/libexec"
 	cp $(SERVER_BIN) "/tmp/pi-clm-bottle/pi-clm-server/$(VERSION)/libexec/clm-server"
 	cp -R $(PRODUCTS)/*.bundle "/tmp/pi-clm-bottle/pi-clm-server/$(VERSION)/libexec/"
-	printf '#!/bin/bash\nexec "/opt/homebrew/opt/pi-clm-server/libexec/clm-server" "$$@"\n' > "/tmp/pi-clm-bottle/pi-clm-server/$(VERSION)/bin/pi-clm-server"
+	printf '#!/bin/bash\nexec "$$(dirname "$$(readlink -f "$$0")")/../libexec/clm-server" "$$@"\n' > "/tmp/pi-clm-bottle/pi-clm-server/$(VERSION)/bin/pi-clm-server"
 	chmod +x "/tmp/pi-clm-bottle/pi-clm-server/$(VERSION)/bin/pi-clm-server"
 	tar -C /tmp/pi-clm-bottle -czf $(BOTTLE) pi-clm-server
-	tar -C $(PRODUCTS) -czf $(TARBALL) $$(cd $(PRODUCTS) && ls | grep -v '^\.' | grep -E '^(CLMServer|.*\.bundle)$$' | sed 's:^:./:')
+	tar -C bin -czf $(TARBALL) clm-server $$(cd bin && ls -d *.bundle)
 	@echo "$(BOTTLE)"; echo "bottle sha256: $$(shasum -a 256 $(BOTTLE) | cut -d' ' -f1)"
 	@echo "$(TARBALL)";  echo "url   sha256: $$(shasum -a 256 $(TARBALL) | cut -d' ' -f1)"
 
 release-upload: brew-bottle
 	$(GH) release create $(RELEASE_TAG) -R $(TAP) --notes $(RELEASE_NOTES) $(BOTTLE) $(TARBALL)
+	@TAP_FILE="repos/jborkowski/homebrew-pi-clm/contents/Formula/pi-clm-server.rb"; \
+	SHA=$$($(GH) api "$$TAP_FILE" --jq .sha 2>/dev/null || true); \
+	$(GH) api --method PUT "$$TAP_FILE" -f message="pi-clm-server $(RELEASE_TAG)" \
+		-f content="$$(base64 < Formula/pi-clm-server.rb)" $${SHA:+-f sha=$$SHA}
 
 uninstall:
 	-$(BREW) uninstall $(TAP)/pi-clm-server

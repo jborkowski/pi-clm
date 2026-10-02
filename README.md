@@ -30,7 +30,7 @@ brew tap jborkowski/pi-clm
 brew install pi-clm-server
 ```
 
-The repo (and its release assets) are private, so the GitHub CLI must be authenticated as a collaborator first — run `gh auth login` once. Bottle and formula versions track the repo's GitHub releases (`make release-upload` packages and uploads them).
+Bottle and formula versions track the repo's GitHub releases (`make release-upload` packages and uploads them and syncs the tap formula).
 
 The extension registers classifier model `clm-latest` — it is a classifier, not a chat model, so it will not show up in `/model`.
 
