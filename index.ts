@@ -18,7 +18,7 @@ import {
   renderStatusLines,
   type PanelActions,
 } from "./src/status-panel.ts";
-import { createClm, DEFAULT_SCORE_CRITERIA, type ClmAnswer, type ClmBoolAnswer, type ClmScoreAnswer } from "./src/codemode.ts";
+import { createClm, toWireQuestion, type ClmEvidence, type ClmQuestionSet } from "./src/codemode.ts";
 export * from "./src/model-manager.ts";
 export * from "./src/model-config.ts";
 export * from "./src/server-manager.ts";
@@ -297,89 +297,94 @@ export default async function (pi: ExtensionAPI, extensionOptions?: ExtensionOpt
 
   const clm = createClm((context) => classifyWrapper(clmModel, context, { apiKey: CLM_LOCAL_API_KEY }));
 
-  // Code-mode surface (issue #9): codemode-only tools returning structured
-  // JSON via outputSchema/structuredContent, so sandbox scripts call
-  // `tools.clm_bool(...)` etc. and compose with Promise.all — no rendered-text
-  // parsing, no string dispatch.
-  const clmNamespace = {
-    name: "clm",
-    description: "Local CLM classifier: typed yes/no, choice, and score questions with probabilities",
-    instructions:
-      "Each tool returns a structured ClmAnswer: { answer, probabilities, confidence, question } " +
-      "(score adds `value`). `state` defaults to { message: question }; pass it to classify a " +
-      "specific text instead of the question itself.",
-  };
-  const clmStructured = (answer: JsonObject) => ({
-    content: [{ type: "text" as const, text: JSON.stringify(answer) }],
-    structuredContent: answer,
-    details: undefined,
-  });
-
-  pi.registerTool({
-    name: "clm_bool",
-    label: "CLM yes/no",
-    description: "Ask the local CLM classifier a yes/no question; returns a ClmAnswer over \"yes\" | \"no\".",
-    exposure: "codemode",
-    namespace: clmNamespace,
-    parameters: Type.Object({
-      question: Type.String({ description: "The yes/no question to ask" }),
-      state: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "State to classify; defaults to { message: question }" })),
-    }),
-    outputSchema: Type.Object({
-      answer: Type.Union([Type.Literal("yes"), Type.Literal("no")]),
-      probabilities: Type.Object({
-        yes: Type.Number(),
-        no: Type.Number(),
+  // Code-mode surface: one composable tool. A single call judges one state
+  // against a fan-out of caller-labeled questions and returns typed answers
+  // (with full distributions) keyed by the same ids — no Promise.all, no
+  // rendered-text parsing, no string dispatch.
+  const boolQuestion = Type.Object({
+    kind: Type.Literal("bool"),
+    instructions: Type.Union([Type.String(), Type.Record(Type.String(), Type.Unknown())]),
+    criteria: Type.Optional(
+      Type.Object({
+        true: Type.Optional(Type.Union([Type.String(), Type.Record(Type.String(), Type.Unknown()), Type.Null()])),
+        false: Type.Optional(Type.Union([Type.String(), Type.Record(Type.String(), Type.Unknown()), Type.Null()])),
       }),
-      confidence: Type.Number(),
-      question: Type.String(),
-    }),
-    async execute(_id, params) {
-      return clmStructured((await clm.bool(params.question, params.state as JsonObject | undefined)) as unknown as JsonObject);
-    },
+    ),
   });
-
-  pi.registerTool({
-    name: "clm_choice",
-    label: "CLM choice",
-    description: "Ask the local CLM classifier a single-choice question; returns a ClmAnswer typed over the criteria keys.",
-    exposure: "codemode",
-    namespace: clmNamespace,
-    parameters: Type.Object({
-      question: Type.String({ description: "The choice question to ask" }),
-      criteria: Type.Record(Type.String(), Type.String(), { description: "Map of criterion key to its description" }),
-      state: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "State to classify; defaults to { message: question }" })),
+  const choiceQuestion = Type.Object({
+    kind: Type.Literal("choice"),
+    instructions: Type.Union([Type.String(), Type.Record(Type.String(), Type.Unknown())]),
+    criteria: Type.Record(Type.String(), Type.Union([Type.String(), Type.Record(Type.String(), Type.Unknown()), Type.Null()])),
+  });
+  const scoreQuestion = Type.Object({
+    kind: Type.Literal("score"),
+    instructions: Type.Union([Type.String(), Type.Record(Type.String(), Type.Unknown())]),
+    criteria: Type.Array(Type.Union([Type.String(), Type.Record(Type.String(), Type.Unknown())]), {
+      minItems: 2,
+      maxItems: 10,
+      description: "Ordered levels, lowest to highest",
     }),
-    outputSchema: Type.Object({
-      answer: Type.String(),
+  });
+  const questionSchema = Type.Union([boolQuestion, choiceQuestion, scoreQuestion]);
+  const answerSchema = Type.Union([
+    Type.Object({
+      kind: Type.Literal("bool"),
+      probability: Type.Number({ description: "P(true), 0-1" }),
+    }),
+    Type.Object({
+      kind: Type.Literal("choice"),
+      choice: Type.String(),
       probabilities: Type.Record(Type.String(), Type.Number()),
-      confidence: Type.Number(),
-      question: Type.String(),
+      confidence: Type.Number({ description: "(pmax - 1/n) / (1 - 1/n): 0 for uniform, 1 for certain" }),
     }),
-    async execute(_id, params) {
-      return clmStructured((await clm.choice(params.question, params.criteria as Record<string, string>, params.state as JsonObject | undefined)) as unknown as JsonObject);
-    },
-  });
+    Type.Object({
+      kind: Type.Literal("score"),
+      score: Type.Number({ description: "Probability-weighted position across levels, 0-1; level i of n sits at i/(n-1)" }),
+      legend: Type.Record(Type.String(), Type.String(), { description: "Level position to level text" }),
+      probabilities: Type.Record(Type.String(), Type.Number()),
+      confidence: Type.Number({ description: "Distance-aware: adjacent splits count less than extreme splits" }),
+    }),
+  ]);
 
   pi.registerTool({
-    name: "clm_score",
-    label: "CLM score",
-    description: `Ask the local CLM classifier for a score; returns { answer, value, confidence, question }. Criteria default to ${DEFAULT_SCORE_CRITERIA.join(", ")}.`,
+    name: "clm",
+    label: "CLM",
+    description:
+      "Judge one state against a fan-out of independent questions. One call, one state, many labeled questions; every answer carries its full probability distribution. Kinds: bool (P(true)), choice (chosen key + distribution + derived confidence), score (probability-weighted position across 2-10 ordered levels + legend + distance-aware confidence).",
     exposure: "codemode",
-    namespace: clmNamespace,
+    namespace: {
+      name: "clm",
+      description: "Local CLM classifier judgment primitives: state separated from questions, discriminated question kinds, distributions as first-class data",
+      instructions:
+        "Pass the evidence once as `state` and any number of questions keyed by stable ids; all questions see the same state and are judged independently. " +
+        "Answers come back keyed by the same ids. Thresholds are application policy — the tool reports distributions.",
+    },
     parameters: Type.Object({
-      question: Type.String({ description: "The scoring question to ask" }),
-      criteria: Type.Optional(Type.Array(Type.Union([Type.String(), Type.Number()]), { description: "Ordered criteria labels, lowest to highest" })),
-      state: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "State to classify; defaults to { message: question }" })),
+      state: Type.Unknown({ description: "The evidence being judged: a string, object, or array" }),
+      questions: Type.Record(Type.String(), questionSchema, {
+        description: "Questions keyed by caller-chosen stable ids",
+      }),
     }),
     outputSchema: Type.Object({
-      answer: Type.String(),
-      value: Type.Number(),
-      confidence: Type.Number(),
-      question: Type.String(),
+      answers: Type.Record(Type.String(), answerSchema, { description: "Answers keyed by the question ids" }),
     }),
     async execute(_id, params) {
-      return clmStructured((await clm.score(params.question, params.criteria, params.state as JsonObject | undefined)) as unknown as JsonObject);
+      const questions = params.questions as ClmQuestionSet;
+      // Validate translation up front so bad question shapes reject cleanly.
+      for (const [id, question] of Object.entries(questions)) {
+        try {
+          toWireQuestion(question);
+        } catch (err: any) {
+          throw new Error(`question "${id}": ${err?.message ?? String(err)}`);
+        }
+      }
+      const answers = await clm.ask(params.state as ClmEvidence, questions);
+      const structured = { answers } as unknown as JsonObject;
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(structured) }],
+        structuredContent: structured,
+        details: undefined,
+      };
     },
   });
 

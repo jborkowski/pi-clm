@@ -56,39 +56,53 @@ The choice is persisted (in `config.json` under `PI_CLM_STATE_DIR`) and reused b
 
 Note: a variant is served natively only when the native binary reports support for its quantization (`clm-server --capabilities`; pre-capability binaries such as brew v0.1.0 are 8-bit-only, so 4/5-bit uses the Python fallback until a rebuilt binary ships) — see [native/clm-server](native/clm-server#constraints); `PI_CLM_SERVER_BIN=""` forces the Python fallback for any variant (requires `uv`).
 
-## Code-mode interface
+## Judgment primitives
 
-The extension registers codemode-exposed tools (`clm_bool`, `clm_choice`, `clm_score`, namespace `clm`) so agents running in code-mode sandboxes can call the classifier programmatically and get structured JSON back instead of parsing rendered tool text. Every tool declares an `outputSchema`, so codemode scripts receive its `structuredContent` — a `ClmAnswer` — directly:
+The extension registers one codemode-exposed tool (`clm`, namespace `clm`): a single composable call that judges one **state** — the evidence being judged — against a fan-out of independent, caller-labeled **questions**. State and questions are separate; all questions in a call see the same state and are judged independently, so fan-out is one call instead of a `Promise.all` of many. The tool declares an `outputSchema`, so codemode scripts receive the structured answers directly.
 
-```ts
-interface ClmAnswer<T extends string = string> {
-  answer: T;               // "yes" | "no" | chosen criterion
-  probabilities: Record<T, number>;
-  confidence: number;
-  question: string;
-}
-// clm_score instead returns: { answer, value, confidence, question }
-```
+Questions are a discriminated union on `kind`:
 
 ```ts
-const [urgent, action] = await Promise.all([
-  tools.clm_bool({ question: "Is this urgent?" }),
-  tools.clm_choice({
-    question: "How should this be handled?",
-    criteria: { refund: "Issue a refund", deny: "Deny the claim", escalate: "Escalate" },
-  }),
-]);
-// urgent.answer === "yes"; action.probabilities.refund === 0.2; …
-const severity = await tools.clm_score({ question: "Rate severity.", criteria: [1, 2, 3, 4, 5] });
-// severity.value === 4
+{ kind: "bool",   instructions, criteria?: { true?, false? } }
+{ kind: "choice", instructions, criteria: Record<string, string | object | null> }
+{ kind: "score",  instructions, criteria: Array<string | object> }  // ordered levels, 2–10
 ```
 
-Each call classifies `state` (defaulting to `{ message: question }`); pass `state` to classify a specific text. The typed helpers are also exported for programmatic use:
+Answers come back keyed by the same ids, with distributions as first-class data:
+
+```ts
+const { answers } = await tools.clm({
+  state: { message: "Customer was charged twice" },
+  questions: {
+    urgent:   { kind: "bool", instructions: "Is this urgent?" },
+    action:   { kind: "choice", instructions: "How should this be handled?",
+                criteria: { refund: "Issue a refund", deny: "Deny the claim", escalate: "Escalate" } },
+    severity: { kind: "score", instructions: "Rate severity.",
+                criteria: ["low", "medium", "high"] },
+  },
+});
+// answers.urgent   -> { kind: "bool", probability }                     P(true), 0–1
+// answers.action   -> { kind: "choice", choice, probabilities, confidence }
+// answers.severity -> { kind: "score", score, legend, probabilities, confidence }
+```
+
+Semantics:
+
+- **bool** reports `probability` of true (0–1). No separate confidence — the probability is the whole story.
+- **choice** reports the highest-probability key plus the full distribution. `confidence = (pmax − 1/n) / (1 − 1/n)`: 0 for a uniform distribution, 1 for certainty.
+- **score** reports the probability-weighted position across the levels, normalized 0–1 (level `i` of `n` sits at `i/(n−1)`), so it can fall between levels. `legend` maps level positions to their texts for interpretation. Its `confidence` accounts for the distance between levels: mass split between adjacent levels is less uncertain than mass split between extremes.
+- Thresholds are **application policy** — the primitives report distributions and never bake in a cutoff.
+
+The same surface is exported for programmatic use, fully typed (answers are typed per question kind):
 
 ```ts
 import { createClm } from "pi-clm";
 const clm = createClm(classify); // classify: (context: ClassifierContext) => Promise<ClassifierResult>
-const answer = await clm.choice("How should this be handled?", { refund: "…", deny: "…", escalate: "…" });
+const { answers } = await clm.ask({ message: "Customer was charged twice" }, {
+  urgent: { kind: "bool", instructions: "Is this urgent?" },
+  // …
+});
+// answers.urgent is typed ClmBoolAnswer, etc.
 ```
 
 ## Wire API
