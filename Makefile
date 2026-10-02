@@ -72,3 +72,36 @@ dist: install-bin ## Build release tar.gz + Homebrew formula into dist/
 clean: ## Remove Swift build artifacts and dist output
 	cd $(SWIFT_DIR) && swift package clean
 	rm -rf dist
+
+# --- Homebrew local-tap workflow (per add-homebrew-formula skill) ---
+BREW    ?= brew
+TAP     := jborkowski/pi-clm
+FORMULA := $(TAP)/pi-clm-server
+export HOMEBREW_NO_AUTO_UPDATE ?= 1
+
+.PHONY: tap pack install uninstall
+
+tap:
+	@if ! $(BREW) tap | grep -qx "$(TAP)"; then \
+		$(BREW) tap-new "$(TAP)" --branch main; \
+	fi
+
+pack: tap dist
+	@TAPDIR="$$($(BREW) --repo $(TAP))"; \
+	mkdir -p "$$TAPDIR/Formula"; \
+	rm -rf "$$TAPDIR/build-src" "$$TAPDIR/pi-clm-server-src.tar.gz"; \
+	rsync -a --exclude '.git/' --exclude 'node_modules/' --exclude 'dist/' --exclude '.DS_Store' \
+		./ "$$TAPDIR/build-src/"; \
+	tar -C "$$TAPDIR" -czf "$$TAPDIR/pi-clm-server-src.tar.gz" build-src; \
+	cp -f dist/pi-clm-server.rb "$$TAPDIR/Formula/pi-clm-server.rb"; \
+	echo "packed into local tap $$TAPDIR"
+
+install: pack
+	@if $(BREW) list --formula "$(FORMULA)" >/dev/null 2>&1; then \
+		$(BREW) reinstall --build-from-source "$(FORMULA)"; \
+	else \
+		$(BREW) install --build-from-source "$(FORMULA)"; \
+	fi
+
+uninstall:
+	$(BREW) uninstall "$(FORMULA)" || true
