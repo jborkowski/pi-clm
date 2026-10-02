@@ -912,54 +912,28 @@ test("Extension index end-to-end classify test suite", async (t) => {
     }
   });
 
-  await t.test("/clm configure explains the Python fallback for non-8-bit variants when a native server exists", async () => {
+  await t.test("/clm configure applies the 4-bit pick without a Python-fallback warning when a native server exists", async () => {
     const warnDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-native-warn-"));
     const fakeBin = path.join(warnDir, "fake-clm-server");
     await fsp.writeFile(fakeBin, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
     const prevBin = process.env.PI_CLM_SERVER_BIN;
-    const extraDirs: string[] = [];
     try {
-      // 4-bit pick with a native binary present: plain warning, choice still applied
+      // 4-bit pick with a native binary present: the native server loads it
+      // too, so there is no fallback warning — the choice is simply applied
       process.env.PI_CLM_SERVER_BIN = fakeBin;
       const sm = new ServerManager({ stateDir: warnDir });
       const { notifications } = await runConfigureCommand({ serverManager: sm });
       assert.ok(
-        notifications.some((n) => n.includes("native server supports the 8-bit checkpoint only")),
+        !notifications.some((n) => n.includes("Python fallback")),
         notifications.join("\n")
       );
-      assert.ok(notifications.some((n) => n.includes("Python fallback")), notifications.join("\n"));
       assert.equal(sm.getModelRepo(), "mlx-community/CLM-v0.1-8B-MLX-4bit");
       const saved = JSON.parse(await fsp.readFile(path.join(warnDir, "config.json"), "utf-8"));
       assert.deepEqual(saved, { modelId: "CLM-v0.1-8B", quantizationId: "4bit" });
-
-      // Without a native binary the same pick needs no warning
-      process.env.PI_CLM_SERVER_BIN = "";
-      const plainDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-native-plain-"));
-      extraDirs.push(plainDir);
-      const noNative = await runConfigureCommand({ serverManager: new ServerManager({ stateDir: plainDir }) });
-      assert.ok(
-        !noNative.notifications.some((n) => n.includes("native server supports")),
-        noNative.notifications.join("\n")
-      );
-
-      // The 8-bit variant keeps the native server and needs no warning
-      process.env.PI_CLM_SERVER_BIN = fakeBin;
-      const bit8Dir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-clm-native-8bit-"));
-      extraDirs.push(bit8Dir);
-      const sm8 = new ServerManager({ stateDir: bit8Dir });
-      const pick8Bit = async (_title: string, options: string[]) =>
-        options.find((o) => o.includes("8B 8-bit")) ?? options[0];
-      const eightBit = await runConfigureCommand({ serverManager: sm8 }, pick8Bit);
-      assert.ok(
-        !eightBit.notifications.some((n) => n.includes("native server supports")),
-        eightBit.notifications.join("\n")
-      );
-      assert.equal(sm8.getModelRepo(), "mlx-community/CLM-v0.1-8B-MLX-8bit");
     } finally {
       if (prevBin === undefined) delete process.env.PI_CLM_SERVER_BIN;
       else process.env.PI_CLM_SERVER_BIN = prevBin;
       await fsp.rm(warnDir, { recursive: true, force: true });
-      for (const dir of extraDirs) await fsp.rm(dir, { recursive: true, force: true });
     }
   });
 

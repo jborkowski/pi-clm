@@ -132,12 +132,19 @@ export function getNativeServerBinPath(): string | null {
 }
 
 /**
- * Whether the pre-compiled native server can serve this model repo: it
- * loads only the 8-bit group-64 checkpoint (asserted at startup), so every
- * other quantization variant must run through the Python server.
+ * Whether the pre-compiled native server can serve this model repo: it loads
+ * the published CLM-v0.1-8B checkpoints — 4-bit-g32, 5-bit and 8-bit-g64
+ * affine quantization, with bits/group size read from each checkpoint's
+ * config — so any other repo must run through the Python server.
  */
+const NATIVE_SUPPORTED_REPOS: ReadonlySet<string> = new Set([
+  "mlx-community/CLM-v0.1-8B-MLX-4bit",
+  "mlx-community/CLM-v0.1-8B-MLX-5bit",
+  DEFAULT_REPO,
+]);
+
 export function isNativeServerSupportedRepo(repo: string): boolean {
-  return repo === DEFAULT_REPO;
+  return NATIVE_SUPPORTED_REPOS.has(repo);
 }
 
 /**

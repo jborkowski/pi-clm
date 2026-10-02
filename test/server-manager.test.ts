@@ -239,7 +239,7 @@ test("native server binary detection and preference", async (t) => {
     });
   });
 
-  await t.test("buildServerCommand picks native for the 8-bit repo, uv for other variants", () => {
+  await t.test("buildServerCommand picks native for the CLM variants, uv for other repos", () => {
     const opts = {
       port: 8700,
       modelPath: "/m",
@@ -248,18 +248,21 @@ test("native server binary detection and preference", async (t) => {
       repo: "mlx-community/CLM-v0.1-8B-MLX-8bit",
     };
 
+    // the native binary loads the 4-bit, 5-bit and 8-bit checkpoints alike
     process.env.PI_CLM_SERVER_BIN = fakeBin;
-    const cmd = buildServerCommand(opts);
-    assert.equal(cmd.native, true);
-    assert.equal(cmd.command, fakeBin);
-    assert.deepEqual(cmd.args, ["--port", "8700", "--model-path", "/m", "--truncation", "head"]);
+    for (const repo of ["mlx-community/CLM-v0.1-8B-MLX-4bit", "mlx-community/CLM-v0.1-8B-MLX-5bit", opts.repo]) {
+      const cmd = buildServerCommand({ ...opts, repo });
+      assert.equal(cmd.native, true);
+      assert.equal(cmd.command, fakeBin);
+      assert.deepEqual(cmd.args, ["--port", "8700", "--model-path", "/m", "--truncation", "head"]);
+    }
 
-    // the native binary loads only the 8-bit checkpoint: other variants — and
-    // any repo when the native server is disabled — go through uv
-    const fourBitWithNative = buildServerCommand({ ...opts, repo: "mlx-community/CLM-v0.1-8B-MLX-4bit" });
+    // a repo the native server cannot load — and any repo when the native
+    // server is disabled — goes through uv
+    const otherWithNative = buildServerCommand({ ...opts, repo: "test/other-repo" });
     process.env.PI_CLM_SERVER_BIN = "";
     const eightBitWithoutNative = buildServerCommand(opts);
-    for (const uv of [fourBitWithNative, eightBitWithoutNative]) {
+    for (const uv of [otherWithNative, eightBitWithoutNative]) {
       assert.equal(uv.native, false);
       assert.equal(uv.command, "uv");
       assert.deepEqual(uv.args, ["run", "/s.py", "--port", "8700", "--model-path", "/m", "--truncation", "head"]);
@@ -288,14 +291,18 @@ test("native server binary detection and preference", async (t) => {
     }
   };
 
-  await t.test("start() spawns the native binary and passes model path + port", async () => {
-    const port = 59128;
+  /**
+   * Starts a server for `repo` through the fake native binary and asserts
+   * the spawn: lockfile port, native command line (no uv `run`), and the
+   * repo's HF-cache snapshot path in --model-path.
+   */
+  const assertNativeStart = async (port: number, repo: string) => {
     await withFakeNativeServer(async ({ argsFile, stateDir }) => {
       const manager = new ServerManager({
         port,
         stateDir,
         hubCacheDir: tempDir,
-        modelRepo: "mlx-community/CLM-v0.1-8B-MLX-8bit",
+        modelRepo: repo,
         startupTimeoutMs: 30_000,
       });
 
@@ -308,39 +315,17 @@ test("native server binary detection and preference", async (t) => {
       const spawnedArgs = (await fsp.readFile(argsFile, "utf-8")).trim().split(/\s+/);
       assert.ok(spawnedArgs.includes("--port"));
       assert.equal(spawnedArgs[spawnedArgs.indexOf("--port") + 1], String(port));
-      assert.ok(spawnedArgs.includes("--model-path"));
-      const modelPath = spawnedArgs[spawnedArgs.indexOf("--model-path") + 1];
-      assert.ok(modelPath.includes("models--mlx-community--CLM-v0.1-8B-MLX-8bit"), modelPath);
       assert.ok(!spawnedArgs.includes("run"), "native spawn must not go through uv");
+      const modelPath = spawnedArgs[spawnedArgs.indexOf("--model-path") + 1];
+      assert.ok(modelPath.includes(`models--${repo.replaceAll("/", "--")}`), modelPath);
 
       await manager.stop();
     });
-  });
+  };
 
-  await t.test("start() serves non-8-bit repos through the Python fallback even with a native binary", async () => {
-    const port = 59129;
-    await withFakeNativeServer(async ({ argsFile, stateDir }) => {
-      const manager = new ServerManager({
-        port,
-        stateDir,
-        hubCacheDir: tempDir,
-        modelRepo: "mlx-community/CLM-v0.1-8B-MLX-4bit",
-        serverScriptPath: path.resolve(process.cwd(), "test/fixtures/mock-server.py"),
-        startupTimeoutMs: 30_000,
-      });
+  await t.test("start() spawns the native binary and passes model path + port", () =>
+    assertNativeStart(59128, "mlx-community/CLM-v0.1-8B-MLX-8bit"));
 
-      await manager.start();
-
-      // The native binary was never spawned...
-      assert.equal(await fsp.stat(argsFile).catch(() => null), null);
-      // ...the server still came up, through the Python fallback, on the 4-bit snapshot
-      const health = await manager.checkHealth();
-      assert.equal(health.ok, true);
-      const lock = await manager.readLockFile();
-      assert.ok(lock);
-      assert.ok(lock.modelPath.includes("models--mlx-community--CLM-v0.1-8B-MLX-4bit"), lock.modelPath);
-
-      await manager.stop();
-    });
-  });
+  await t.test("start() spawns the native binary for the 4-bit repo too", () =>
+    assertNativeStart(59129, "mlx-community/CLM-v0.1-8B-MLX-4bit"));
 });
