@@ -57,10 +57,12 @@ swift build -c release --product CLMServer
 swift test
 ```
 
-Deploy: copy `.build/out/Products/Release/CLMServer` **and**
-`.build/out/Products/Release/mlx-swift_Cmlx.bundle` next to each other into
-`bin/` — the MLX C++ runtime loads
-`<exe dir>/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib` at startup.
+Deploy: `make install-bin` installs the binary, the SwiftPM resource
+bundles, and `mlx.metallib` into `bin/`. SwiftPM never compiles MLX's Metal
+kernels (an Xcode-only step), so `make mlx-metallib` compiles them first —
+without `<exe dir>/mlx.metallib` (MLX's first lookup path) the server dies at
+MLX init with "Failed to load the default metallib"; the remaining kernels
+are JIT-compiled from source embedded in Cmlx at runtime.
 [`scripts/build.sh`](../../scripts/build.sh) automates build, install, and checks.
 
 Prerequisites: a stable Xcode selected via `xcode-select` (beta toolchains

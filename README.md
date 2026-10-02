@@ -65,7 +65,7 @@ Run `/clm configure` to pick a model and quantization level from a friendly menu
 
 The choice is persisted (in `config.json` under `PI_CLM_STATE_DIR`) and reused by later sessions. If you never open the menu, nothing changes: the existing default (8-bit) stays in effect and the extension starts silently with it; run `/clm configure` to pick a variant. After a change, a server owned solely by the current session is stopped so the next start uses the new variant; a server shared with other sessions or started externally keeps serving the previous variant until it stops.
 
-Note: a variant is served natively only when the native binary reports support for its quantization (`clm-server --capabilities`; pre-capability binaries such as brew v0.1.0 are 8-bit-only, so 4/5-bit uses the Python fallback until a rebuilt binary ships) — see [native/clm-server](native/clm-server#constraints); `PI_CLM_SERVER_BIN=""` forces the Python fallback for any variant (requires `uv`).
+Note: a variant is served natively only when the native binary reports support for its quantization (`clm-server --capabilities`; pre-capability binaries such as brew v0.1.0 are 8-bit-only, so 4/5-bit uses the Python fallback until you `brew upgrade` to the capabilities-aware 0.2.0+ bottle) — see [native/clm-server](native/clm-server#constraints); `PI_CLM_SERVER_BIN=""` forces the Python fallback for any variant (requires `uv`).
 
 ## Judgment primitives
 
