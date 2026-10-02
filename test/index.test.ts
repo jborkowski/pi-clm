@@ -130,6 +130,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
   const makeCommandPi = (commands: Record<string, any>, eventHandlers?: Record<string, any>) => {
     const pi: any = {
       registerProvider: () => {},
+      registerTool: () => {},
       on: (event: string, handler: any) => {
         if (eventHandlers) eventHandlers[event] = handler;
       },
@@ -335,7 +336,7 @@ test("Extension index end-to-end classify test suite", async (t) => {
       registerTool: (config: any) => registeredTools.push(config),
     };
     const serverManager = new ServerManager({ stateDir: tempDir, port, host: "127.0.0.1" });
-    registerPlugin(toolPi, { serverManager });
+    await registerPlugin(toolPi, { serverManager });
 
     const byName = Object.fromEntries(registeredTools.map((tool) => [tool.name, tool]));
     assert.deepEqual(Object.keys(byName).sort(), ["clm_bool", "clm_choice", "clm_score"]);
