@@ -13,10 +13,23 @@ SWIFT_DIR  := native/clm-server
 # products in .build/arm64-apple-macosx/release instead.
 PRODUCTS   ?= $(shell test -x $(SWIFT_DIR)/.build/out/Products/Release/CLMServer && echo $(SWIFT_DIR)/.build/out/Products/Release || echo $(SWIFT_DIR)/.build/arm64-apple-macosx/release)
 SERVER_BIN := bin/clm-server
+METALLIB   := bin/mlx.metallib
 REFERENCE  := test/fixtures/native-parity-reference.json
 
+# SwiftPM never compiles MLX's Metal kernels (Xcode-only step), so the server
+# dies at MLX init with "Failed to load the default metallib" unless we build
+# mlx.metallib ourselves and ship it next to the binary (MLX's first lookup
+# path). Sources are the kernel files mlx-swift prepares for Xcode builds in
+# Source/Cmlx/mlx-generated/metal; flags mirror mlx's
+# mlx/backend/metal/kernels/CMakeLists.txt. The remaining kernels are
+# JIT-compiled from source embedded in the Cmlx target at runtime.
+MLX_CHECKOUT    := $(SWIFT_DIR)/.build/checkouts/mlx-swift
+MLX_METAL_DIR   := $(MLX_CHECKOUT)/Source/Cmlx/mlx-generated/metal
+MLX_METALLIB_DIR := $(SWIFT_DIR)/.build/mlx-metallib
+MLX_KERNELS     := arg_reduce conv dot layer_norm random rms_norm rope scaled_dot_product_attention searchsorted steel/attn/kernels/steel_attention
+
 .DEFAULT_GOAL := help
-.PHONY: help build native install-bin deps test test-swift test-ts typecheck dup parity e2e serve clean
+.PHONY: help build native mlx-metallib install-bin deps test test-swift test-ts typecheck dup parity e2e serve clean
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | sed -E 's|^([a-zA-Z_-]+):.*## (.*)|  \1\t\2|' | awk -F'\t' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -27,12 +40,23 @@ deps: ## npm install
 native: deps ## Build native clm-server (Swift release, arm64)
 	cd $(SWIFT_DIR) && swift build -c release --product CLMServer
 
-install-bin: native ## Install binary + SwiftPM resource bundles into bin/
+mlx-metallib: native ## Compile MLX's Metal kernels into mlx.metallib
+	@test -d "$(MLX_METAL_DIR)" || { echo "mlx-swift kernel sources missing at $(MLX_METAL_DIR)"; exit 1; }
+	rm -rf $(MLX_METALLIB_DIR) && mkdir -p $(MLX_METALLIB_DIR)
+	cd $(MLX_METAL_DIR) && for k in $(MLX_KERNELS); do \
+		xcrun -sdk macosx metal -x metal -Wall -Wextra -fno-fast-math \
+			-Wno-c++17-extensions -Wno-c++20-extensions -Wmetal-addr-spaces \
+			-c $$k.metal -I . -o $(CURDIR)/$(MLX_METALLIB_DIR)/$$(basename $$k).air || exit 1; \
+	done
+	xcrun -sdk macosx metal $(MLX_METALLIB_DIR)/*.air -o $(MLX_METALLIB_DIR)/mlx.metallib
+
+install-bin: mlx-metallib ## Install binary + SwiftPM resource bundles + MLX metallib into bin/
 	@test -x $(PRODUCTS)/CLMServer || { echo "build products missing in $(PRODUCTS)"; exit 1; }
 	mkdir -p bin
 	cp $(PRODUCTS)/CLMServer $(SERVER_BIN)
 	rm -rf bin/*.bundle
 	cp -R $(PRODUCTS)/*.bundle bin/
+	cp $(MLX_METALLIB_DIR)/mlx.metallib $(METALLIB)
 	@file $(SERVER_BIN)
 
 build: install-bin test ## Everything: build, install, all checks (scripts/build.sh one-shot equivalent)
@@ -70,7 +94,7 @@ clean: ## Remove Swift build artifacts and dist output
 
 # --- Homebrew release workflow (prebuilt bottle, no compile-on-install) ---
 # `make brew-bottle` packages the release binary + SwiftPM resource bundles
-# into dist/: a brew bottle tarball (pi-clm-server-<V>.<tag>.bottle.tar.gz)
+# + MLX's mlx.metallib into dist/: a brew bottle tarball (pi-clm-server-<V>.<tag>.bottle.tar.gz)
 # and a plain binary tarball used as the formula's stable URL. Packaging is
 # deterministic (fixed mtimes, gzip -n); both sha256 sums are written to
 # dist/sha256s.txt — paste them and the new version into Formula/pi-clm-server.rb.
@@ -96,13 +120,15 @@ brew-bottle: install-bin
 	rm -rf $(STAGING) && mkdir -p "$(STAGING)/pi-clm-server/$(VERSION)/bin" "$(STAGING)/pi-clm-server/$(VERSION)/libexec" "$(STAGING)/src"
 	cp $(SERVER_BIN) "$(STAGING)/pi-clm-server/$(VERSION)/libexec/clm-server"
 	cp -R $(PRODUCTS)/*.bundle "$(STAGING)/pi-clm-server/$(VERSION)/libexec/"
+	cp $(METALLIB) "$(STAGING)/pi-clm-server/$(VERSION)/libexec/mlx.metallib"
 	printf '#!/bin/bash\nexec "$$(dirname "$$(readlink -f "$$0")")/../libexec/clm-server" "$$@"\n' > "$(STAGING)/pi-clm-server/$(VERSION)/bin/pi-clm-server"
 	chmod +x "$(STAGING)/pi-clm-server/$(VERSION)/bin/pi-clm-server"
 	cp $(SERVER_BIN) "$(STAGING)/src/clm-server"
 	cp -R $(PRODUCTS)/*.bundle "$(STAGING)/src/"
+	cp $(METALLIB) "$(STAGING)/src/mlx.metallib"
 	find $(STAGING) -exec touch -t $(PINNED_MTIME) {} +
 	(cd $(STAGING) && tar -cf - pi-clm-server) | gzip -n > $(BOTTLE)
-	(cd $(STAGING)/src && tar -cf - clm-server *.bundle) | gzip -n > $(TARBALL)
+	(cd $(STAGING)/src && tar -cf - clm-server mlx.metallib *.bundle) | gzip -n > $(TARBALL)
 	@shasum -a 256 $(BOTTLE) $(TARBALL) | sed 's|dist/||' > dist/sha256s.txt
 	@cat dist/sha256s.txt
 
